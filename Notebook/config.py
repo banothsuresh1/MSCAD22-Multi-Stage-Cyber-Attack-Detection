@@ -73,6 +73,18 @@ VERIFICATION_CSV = OUTPUT_DIR / "verification.csv"       # Stage D
 # other file in the folder are ignored.
 FLOW_CSV_PATTERN = "*_flows.csv"
 
+# Where Step 2 looks for those CSVs.  CSV_OUTPUT_DIR (what Step 1 wrote) is
+# tried first; the others are fallbacks in case the folder was renamed or the
+# CSVs were collected somewhere else.  find_flow_csvs() reports which one it
+# used, so the choice is never silent.
+MSCAD_DATASET_DIR = DATA_ROOT / "MSCAD_Dataset"
+CSV_CANDIDATE_DIRS = [
+    CSV_OUTPUT_DIR,                     # C:\MSCAD2022\CSVs  (Step 1's output)
+    MSCAD_DATASET_DIR,                  # C:\MSCAD2022\MSCAD_Dataset
+    PROJECT_ROOT / "MSCAD_Dataset",
+    DATA_ROOT / "MSCAD_CSVs",
+]
+
 MERGED_CSV = MERGED_DIR / "MSCAD_merged.csv"
 MERGED_PARQUET = MERGED_DIR / "MSCAD_merged.parquet"
 STEP2_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "step2"
