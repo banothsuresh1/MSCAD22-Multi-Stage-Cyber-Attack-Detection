@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# STEP 1 ONLY -- PCAPNG -> PCAP -> one flow CSV per capture
+# ---------------------------------------------------------------------------
+# Needed by notebooks\convert_pcapng_to_csvflows.ipynb and src\converter.py.
+# The ML pipeline (Step 2 onward) uses requirements.txt instead.
+#
+# Install with cmd (NOT PowerShell).  The quotes matter: the path has spaces.
+#
+#   "C:\Users\banot\AppData\Local\Programs\Python\Python313\python.exe" -m pip install -r requirements-conversion.txt
+#
+# The flow extractor runs in the JUPYTER KERNEL, so scapy and pandas must be
+# installed in whatever interpreter the kernel uses -- which may not be the one
+# above.  Cell 3 of the Step 1 notebook checks both and prints the right command.
+
+scapy>=2.5.0        # streaming capture reading (PcapReader) + packet dissection
+numpy>=1.24         # feature maths
+scipy>=1.10         # statistics helpers used by cicflowmeter
+pandas>=2.0         # CSV writing, renaming/reordering, verification tables
+requests>=2.28      # a cicflowmeter dependency (installed here, since --no-deps skips it)
+tqdm>=4.65          # per-capture progress bars
+jupyter>=1.0        # the notebook front-end
+pytest>=7.4         # tests\test_converter.py
+
+# ---------------------------------------------------------------------------
+# cicflowmeter must be installed SEPARATELY -- it cannot go in this file.
+# ---------------------------------------------------------------------------
+# Version 0.5.0 pins old dependency versions and declares python_requires < 3.13,
+# so a plain "pip install cicflowmeter==0.5.0" fails on Python 3.13.  Run:
+#
+#   pip install cicflowmeter==0.5.0 --no-deps --ignore-requires-python
+#
+#   --no-deps                 skip its dependency pins (the lines above cover them)
+#   --ignore-requires-python  skip its Python-version gate
+#
+# cicflowmeter==0.5.0
+
+# ---------------------------------------------------------------------------
+# Not a Python package, but required by Step 1:
+#   Wireshark -- ships editcap.exe, tshark.exe and capinfos.exe
+#   https://www.wireshark.org/download.html
+# Optional:
+#   openpyxl -- only if the Kaggle reference file is .xlsx rather than .csv
+# ---------------------------------------------------------------------------
+# openpyxl>=3.1

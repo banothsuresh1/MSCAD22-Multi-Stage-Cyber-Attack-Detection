@@ -1,48 +1,33 @@
 # ---------------------------------------------------------------------------
-# Step 1 requirements -- PCAPNG -> PCAP -> flow CSV
+# ML PIPELINE -- Step 2 onward (notebooks\MSCAD_Pipeline.ipynb)
 # ---------------------------------------------------------------------------
+# Step 1's capture-conversion packages live in requirements-conversion.txt.
+# Nothing is duplicated between the two files on purpose: cicflowmeter, scapy,
+# scipy and requests are Step 1 only and are NOT listed here.
+#
 # Install with cmd (NOT PowerShell).  The quotes matter: the path has spaces.
 #
 #   "C:\Users\banot\AppData\Local\Programs\Python\Python313\python.exe" -m pip install -r requirements.txt
 #
-scapy>=2.5.0        # streaming capture reading (PcapReader) + packet dissection
-numpy>=1.24         # feature maths
-scipy>=1.10         # statistics helpers used by cicflowmeter
-pandas>=2.0         # CSV writing, renaming/reordering, verification tables
-requests>=2.28      # a cicflowmeter dependency (installed here, since --no-deps skips it)
-tqdm>=4.65          # per-capture progress bars
+# If your Jupyter kernel is a different interpreter (e.g. a conda env), install
+# into THAT interpreter instead -- it is the one the notebook actually uses.
+
+pandas>=2.0         # load and merge the per-capture flow CSVs
+numpy>=1.24         # numerics, inf/NaN handling
+matplotlib>=3.7     # the Step 2 label bar chart
+pyarrow>=14.0       # fast Parquet read/write for the merged dataset
+tqdm>=4.65          # progress bars while loading the CSVs
 jupyter>=1.0        # the notebook front-end
-pytest>=7.4         # tests\test_converter.py (no captures, no Wireshark needed)
+pytest>=7.4         # tests\test_data_loading.py
 
 # ---------------------------------------------------------------------------
-# cicflowmeter must be installed SEPARATELY -- it cannot go in this file.
+# LATER STAGES (Step 3 onward) -- deliberately commented out.
+# Step 2 must not install or import any of these.
 # ---------------------------------------------------------------------------
-# Version 0.5.0 pins old dependency versions and declares python_requires < 3.13,
-# so a plain "pip install cicflowmeter==0.5.0" fails on Python 3.13.  Run:
-#
-#   "C:\Users\banot\AppData\Local\Programs\Python\Python313\python.exe" -m pip install cicflowmeter==0.5.0 --no-deps --ignore-requires-python
-#
-#   --no-deps                 skip its dependency pins (the lines above cover them)
-#   --ignore-requires-python  skip its Python-version gate
-#
-# cicflowmeter==0.5.0
-
-# ---------------------------------------------------------------------------
-# Also needed, but not Python packages:
-#   Wireshark (ships editcap.exe and tshark.exe)  https://www.wireshark.org/download.html
-#   openpyxl -- only if your Kaggle reference file is .xlsx instead of .csv
-# ---------------------------------------------------------------------------
-# openpyxl>=3.1
-
-# ---------------------------------------------------------------------------
-# LATER STAGES (Step 2 onward) -- deliberately commented out.  Step 1 must not
-# install or import any of these.
-# ---------------------------------------------------------------------------
-# scikit-learn>=1.3        # Stage 3 feature selection, RF, metrics
-# xgboost>=2.0             # Stage 6 XGBoost
-# tensorflow>=2.16         # Stage 4 autoencoder, Stage 6 LSTM / CNN
-# imbalanced-learn>=0.11   # Stage 5 class imbalance (SMOTE etc.)
-# prefixspan>=0.5.2        # sequential pattern mining on the attack chains
-# matplotlib>=3.7          # Stage 7 plots
-# seaborn>=0.12            # Stage 7 plots
-# networkx>=3.1            # attack-state graph
+# scikit-learn>=1.3        # Stage 3 feature selection, Random Forest, metrics
+# xgboost>=2.0             # XGBoost classifier
+# tensorflow>=2.16         # autoencoder, LSTM, CNN, hybrid CNN-LSTM
+# imbalanced-learn>=0.11   # class-imbalance handling (SMOTE etc.)
+# prefixspan>=0.5.2        # sequential pattern mining over the attack chains
+# networkx>=3.1            # the attack-state graph
+# seaborn>=0.12            # extra plots
