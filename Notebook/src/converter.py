@@ -1100,22 +1100,6 @@ def packet_record_from_scapy(pkt) -> PacketRecord | None:
     )
 
 
-def extract_flows(pcap_path: Path | str, **kwargs):
-    """Read a .pcap and return the raw per-flow DataFrame.  STAGE C -- not yet written.
-
-    Everything it will need is already here and unit-tested: PacketRecord
-    (fix #6), flow_key (fix #2), the 120 s / 240 s timeouts in config, the TCP
-    flag helpers (fix #4) and the post-processing below.  What is missing is the
-    flow table itself: accumulating the features, the per-flow timeout check plus
-    periodic sweep (fix #7), and the first-packet double-count fix (fix #5).
-    """
-    raise NotImplementedError(
-        "extract_flows() is Stage C and is not implemented yet.\n"
-        "Stage B (pcapng -> pcap) and all the post-processing below are ready.\n"
-        "Say 'go' for Stage C and this is the next thing written."
-    )
-
-
 # ===========================================================================
 # STAGE C -- post-processing (pure pandas, no captures needed)
 # ===========================================================================
@@ -1258,3 +1242,845 @@ def postprocess(raw_df, stem: str, rep: Report | None = None) -> tuple[Any, dict
     }
     rep.say("  %s: %d flows, dropped %d extra column(s)" % (stem, len(df), len(dropped)))
     return df, info
+
+
+# ===========================================================================
+# STAGE C -- the flow engine
+# ===========================================================================
+def _sample_std(values: Sequence[float]) -> float:
+    """Sample standard deviation (the n-1 kind), 0.0 for fewer than 2 values.
+
+    The Java CICFlowMeter uses Apache Commons' StandardDeviation, which is the
+    sample version and which reports 0 for a single observation, so we match it
+    rather than using numpy's population default.
+    """
+    n = len(values)
+    if n < 2:
+        return 0.0
+    mean = sum(values) / n
+    return (sum((v - mean) ** 2 for v in values) / (n - 1)) ** 0.5
+
+
+def _sample_var(values: Sequence[float]) -> float:
+    """Sample variance, 0.0 for fewer than 2 values."""
+    n = len(values)
+    if n < 2:
+        return 0.0
+    mean = sum(values) / n
+    return sum((v - mean) ** 2 for v in values) / (n - 1)
+
+
+def _mean(values: Sequence[float]) -> float:
+    return (sum(values) / len(values)) if values else 0.0
+
+
+def _max(values: Sequence[float]) -> float:
+    return max(values) if values else 0.0
+
+
+def _min(values: Sequence[float]) -> float:
+    return min(values) if values else 0.0
+
+
+def _diffs(times: Sequence[float]) -> list[float]:
+    """Inter-arrival gaps between consecutive timestamps."""
+    return [times[i] - times[i - 1] for i in range(1, len(times))]
+
+
+# A subflow boundary in CICFlowMeter is a gap of more than one second.
+SUBFLOW_GAP_S = 1.0
+
+
+class Flow:
+    """One network flow, accumulating everything the 66 features need.
+
+    A flow is created by its FIRST packet, and that packet's direction becomes
+    "forward".  Packets arriving with the reversed 5-tuple are "backward".
+
+    Fix #5 (first packet counted twice): the constructor calls add() exactly
+    once for the first packet and the main loop never adds it again.  Stock
+    cicflowmeter created the flow with the packet AND then added it, so every
+    flow's first packet was counted twice.  The Stage D check
+    "sum(Tot Fwd Pkts + Tot Bwd Pkts) == independent IPv4 count" is what proves
+    this is fixed.
+    """
+
+    def __init__(self, rec: PacketRecord, key: tuple) -> None:
+        self.key = key                      # the dict key this flow lives under
+        self.src_ip, self.dst_ip, self.src_port, self.dst_port, self.protocol = key
+        self.start_time = rec.time
+        self.last_time = rec.time
+
+        # per-direction packet lengths and arrival times
+        self.fwd_lens: list[int] = []
+        self.bwd_lens: list[int] = []
+        self.fwd_times: list[float] = []
+        self.bwd_times: list[float] = []
+        self.all_times: list[float] = []
+
+        self.fwd_header = 0
+        self.bwd_header = 0
+        self.fwd_payload_bytes = 0
+        self.bwd_payload_bytes = 0
+        self.fwd_act_data_pkts = 0
+
+        # flag counters over the whole flow (CICFlowMeter counts packets)
+        self.fin = self.syn = self.rst = self.psh = 0
+        self.ack = self.urg = self.ece = self.cwr = 0
+        # direction-specific PSH/URG, which MSCAD keeps only for backward
+        self.fwd_psh = self.bwd_psh = 0
+        self.fwd_urg = self.bwd_urg = 0
+        # FIN seen per direction, so a TCP flow closes only after both sides
+        self.fwd_fin = self.bwd_fin = 0
+
+        self.init_fwd_win: int | None = None
+        self.init_bwd_win: int | None = None
+        self.fwd_seg_size_min: int | None = None
+
+        self.add(rec, forward=True)         # the first packet, added ONCE
+
+    # -- accumulate -------------------------------------------------------
+    def add(self, rec: PacketRecord, forward: bool) -> None:
+        self.last_time = rec.time
+        self.all_times.append(rec.time)
+
+        if forward:
+            self.fwd_lens.append(rec.cap_len)
+            self.fwd_times.append(rec.time)
+            self.fwd_header += rec.header_len
+            self.fwd_payload_bytes += rec.payload_len
+            if rec.payload_len > 0:
+                self.fwd_act_data_pkts += 1
+            if rec.psh:
+                self.fwd_psh += 1
+            if rec.urg:
+                self.fwd_urg += 1
+            if rec.fin:
+                self.fwd_fin += 1
+            if self.init_fwd_win is None and rec.protocol == PROTO_TCP:
+                self.init_fwd_win = rec.window
+            if self.fwd_seg_size_min is None or rec.header_len < self.fwd_seg_size_min:
+                self.fwd_seg_size_min = rec.header_len
+        else:
+            self.bwd_lens.append(rec.cap_len)
+            self.bwd_times.append(rec.time)
+            self.bwd_header += rec.header_len
+            self.bwd_payload_bytes += rec.payload_len
+            if rec.psh:
+                self.bwd_psh += 1
+            if rec.urg:
+                self.bwd_urg += 1
+            if rec.fin:
+                self.bwd_fin += 1
+            if self.init_bwd_win is None and rec.protocol == PROTO_TCP:
+                self.init_bwd_win = rec.window
+
+        # Fix #4: these come from the TCP flag byte (see PacketRecord), not from
+        # the IP flags field that stock cicflowmeter read by mistake.
+        self.fin += rec.fin
+        self.syn += rec.syn
+        self.rst += rec.rst
+        self.psh += rec.psh
+        self.ack += rec.ack
+        self.urg += rec.urg
+        self.ece += rec.ece
+        self.cwr += rec.cwr
+
+    # -- closing ----------------------------------------------------------
+    @property
+    def packet_count(self) -> int:
+        return len(self.fwd_lens) + len(self.bwd_lens)
+
+    @property
+    def duration_s(self) -> float:
+        return self.last_time - self.start_time
+
+    def tcp_finished(self) -> bool:
+        """True when a TCP flow has closed itself: FIN both ways, or a RST."""
+        if self.protocol != PROTO_TCP:
+            return False
+        return (self.fwd_fin >= 1 and self.bwd_fin >= 1) or self.rst >= 1
+
+    def active_idle_periods(self, activity_timeout_s: float) -> tuple[list[float], list[float]]:
+        """Split the flow's timeline into active periods and idle gaps."""
+        times = self.all_times
+        if len(times) < 2:
+            return [0.0], []
+        active: list[float] = []
+        idle: list[float] = []
+        start = prev = times[0]
+        for t in times[1:]:
+            gap = t - prev
+            if gap > activity_timeout_s:
+                active.append(prev - start)
+                idle.append(gap)
+                start = t
+            prev = t
+        active.append(prev - start)
+        return active, idle
+
+    def subflow_count(self) -> int:
+        """Number of subflows: a gap over one second starts a new one."""
+        gaps = _diffs(self.all_times)
+        return 1 + sum(1 for g in gaps if g > SUBFLOW_GAP_S)
+
+    # -- the 72 raw columns ----------------------------------------------
+    def to_row(self, activity_timeout_s: float,
+               init_win_absent: int) -> dict[str, Any]:
+        """Build one RAW row: snake_case names, all times still in SECONDS.
+
+        The microsecond conversion happens later, in postprocess(), so that the
+        raw CSV stays exactly what the extractor produced.
+        """
+        from datetime import datetime, timezone
+
+        fwd_n, bwd_n = len(self.fwd_lens), len(self.bwd_lens)
+        total_n = fwd_n + bwd_n
+        totlen_fwd, totlen_bwd = sum(self.fwd_lens), sum(self.bwd_lens)
+        all_lens = self.fwd_lens + self.bwd_lens
+        duration = self.duration_s
+
+        flow_iat = _diffs(self.all_times)
+        fwd_iat = _diffs(self.fwd_times)
+        bwd_iat = _diffs(self.bwd_times)
+        active, idle = self.active_idle_periods(activity_timeout_s)
+        sf = max(1, self.subflow_count())
+
+        # Rates: a zero-duration flow divides by zero.  float("inf") is the
+        # CORRECT answer here and the spec says to keep it, so we do -- the
+        # Stage D table counts the inf values instead of hiding them.
+        def per_second(value: float) -> float:
+            if duration > 0:
+                return value / duration
+            return float("inf") if value > 0 else 0.0
+
+        return {
+            # --- identifiers --------------------------------------------
+            "src_ip": self.src_ip,
+            "dst_ip": self.dst_ip,
+            "src_port": int(self.src_port),
+            "dst_port": int(self.dst_port),
+            "protocol": int(self.protocol),
+            # flow START time, in UTC.  Stage D's duplicate check is
+            # "same 5-tuple + same start Timestamp", so this must be the start.
+            "timestamp": datetime.fromtimestamp(self.start_time, tz=timezone.utc)
+                                 .strftime("%Y-%m-%d %H:%M:%S.%f"),
+            # --- duration and counts ------------------------------------
+            "flow_duration": duration,
+            "tot_fwd_pkts": fwd_n,
+            "tot_bwd_pkts": bwd_n,
+            "totlen_fwd_pkts": totlen_fwd,
+            "totlen_bwd_pkts": totlen_bwd,
+            # --- per-direction packet lengths ---------------------------
+            "fwd_pkt_len_max": _max(self.fwd_lens),
+            "fwd_pkt_len_min": _min(self.fwd_lens),
+            "fwd_pkt_len_mean": _mean(self.fwd_lens),
+            "fwd_pkt_len_std": _sample_std(self.fwd_lens),
+            "bwd_pkt_len_max": _max(self.bwd_lens),
+            "bwd_pkt_len_min": _min(self.bwd_lens),
+            "bwd_pkt_len_mean": _mean(self.bwd_lens),
+            "bwd_pkt_len_std": _sample_std(self.bwd_lens),
+            # --- rates ---------------------------------------------------
+            "flow_byts_s": per_second(totlen_fwd + totlen_bwd),
+            "flow_pkts_s": per_second(total_n),
+            "fwd_pkts_s": per_second(fwd_n),
+            "bwd_pkts_s": per_second(bwd_n),
+            # --- inter-arrival times (seconds here) ---------------------
+            "flow_iat_mean": _mean(flow_iat),
+            "flow_iat_std": _sample_std(flow_iat),
+            "flow_iat_max": _max(flow_iat),
+            "flow_iat_min": _min(flow_iat),
+            "fwd_iat_tot": sum(fwd_iat),
+            "fwd_iat_mean": _mean(fwd_iat),
+            "fwd_iat_std": _sample_std(fwd_iat),
+            "fwd_iat_max": _max(fwd_iat),
+            "fwd_iat_min": _min(fwd_iat),
+            "bwd_iat_tot": sum(bwd_iat),
+            "bwd_iat_mean": _mean(bwd_iat),
+            "bwd_iat_std": _sample_std(bwd_iat),
+            "bwd_iat_max": _max(bwd_iat),
+            "bwd_iat_min": _min(bwd_iat),
+            # --- flags and headers --------------------------------------
+            "fwd_psh_flags": self.fwd_psh,      # dropped later: not in MSCAD
+            "bwd_psh_flags": self.bwd_psh,
+            "fwd_urg_flags": self.fwd_urg,      # dropped later: not in MSCAD
+            "bwd_urg_flags": self.bwd_urg,
+            "fwd_header_len": self.fwd_header,
+            "bwd_header_len": self.bwd_header,
+            # --- packet-length statistics over BOTH directions ----------
+            "pkt_len_min": _min(all_lens),
+            "pkt_len_max": _max(all_lens),
+            "pkt_len_mean": _mean(all_lens),
+            "pkt_len_std": _sample_std(all_lens),
+            "pkt_len_var": _sample_var(all_lens),
+            # --- TCP flag counters --------------------------------------
+            "fin_flag_cnt": self.fin,
+            "syn_flag_cnt": self.syn,
+            "rst_flag_cnt": self.rst,
+            "psh_flag_cnt": self.psh,
+            "ack_flag_cnt": self.ack,
+            "urg_flag_cnt": self.urg,
+            "cwr_flag_count": self.cwr,        # becomes "CWE Flag Count"
+            "ece_flag_cnt": self.ece,
+            # --- ratios and averages ------------------------------------
+            "down_up_ratio": (bwd_n / fwd_n) if fwd_n else 0.0,
+            "pkt_size_avg": ((totlen_fwd + totlen_bwd) / total_n) if total_n else 0.0,
+            "fwd_seg_size_avg": (totlen_fwd / fwd_n) if fwd_n else 0.0,
+            "bwd_seg_size_avg": (totlen_bwd / bwd_n) if bwd_n else 0.0,
+            # --- subflows (averages per subflow) ------------------------
+            "subflow_fwd_pkts": fwd_n / sf,
+            "subflow_fwd_byts": totlen_fwd / sf,
+            "subflow_bwd_pkts": bwd_n / sf,
+            "subflow_bwd_byts": totlen_bwd / sf,
+            # --- window sizes and data packets --------------------------
+            "init_fwd_win_byts": init_win_absent if self.init_fwd_win is None
+                                 else self.init_fwd_win,     # dropped later
+            "init_bwd_win_byts": init_win_absent if self.init_bwd_win is None
+                                 else self.init_bwd_win,
+            "fwd_act_data_pkts": self.fwd_act_data_pkts,
+            "fwd_seg_size_min": self.fwd_seg_size_min or 0,  # dropped later
+            # --- active / idle (seconds here) ---------------------------
+            "active_mean": _mean(active),
+            "active_std": _sample_std(active),
+            "active_max": _max(active),
+            "active_min": _min(active),
+            "idle_mean": _mean(idle),
+            "idle_std": _sample_std(idle),
+            "idle_max": _max(idle),
+            "idle_min": _min(idle),
+            # --- bulk-rate columns: CICFlowMeter emits 0 and MSCAD drops them
+            "fwd_byts_b_avg": 0,
+            "fwd_pkts_b_avg": 0,
+            "fwd_blk_rate_avg": 0,
+            "bwd_byts_b_avg": 0,
+            "bwd_pkts_b_avg": 0,
+            "bwd_blk_rate_avg": 0,
+        }
+
+
+def iter_packet_records(pcap_path: Path | str):
+    """Stream a capture and yield one PacketRecord per IPv4 packet.
+
+    Fix #6: scapy's PcapReader reads one packet at a time, and we immediately
+    copy out the few fields we need, so no scapy packet is ever kept alive.
+    rdpcap() would load the whole file into RAM, which is what crashed on the
+    flood captures.
+
+    Fix #3: no BPF capture filter is used anywhere.  Stock cicflowmeter's filter
+    needs tcpdump, which does not exist on Windows.  Filtering to IPv4 happens
+    in Python, in packet_record_from_scapy().
+
+    Yields (record, total_packets_seen) so the caller can count non-IPv4
+    packets (ARP / IPv6), which are excluded from flows by design.
+
+    IMPORTANT -- why the layer modules are imported HERE, before PcapReader:
+    PcapReader picks the link-layer class when it opens the file, from the
+    link-type in the file header (1 = Ethernet).  scapy only knows that 1 means
+    Ether once scapy.layers.l2 has been imported.  Importing the layers lazily
+    further down meant the FIRST capture of a session was decoded as Raw -- so
+    "IP in pkt" was False for every packet and the capture produced 0 flows,
+    while every later capture worked.  Importing both modules up front fixes it.
+    """
+    import scapy.layers.inet  # noqa: F401  (registers IP/TCP/UDP/ICMP)
+    import scapy.layers.l2  # noqa: F401  (registers Ether for link-type 1)
+    from scapy.utils import PcapReader
+
+    with PcapReader(str(pcap_path)) as reader:
+        for seen, pkt in enumerate(reader, start=1):
+            rec = packet_record_from_scapy(pkt)
+            yield rec, seen
+
+
+def extract_flows(pcap_path: Path | str,
+                  flow_timeout_s: float | None = None,
+                  activity_timeout_s: float | None = None,
+                  progress_every: int | None = None,
+                  sweep_every: int | None = None,
+                  rep: Report | None = None,
+                  show_progress: bool = True):
+    """Read a .pcap and return (raw DataFrame, stats dict).
+
+    The DataFrame has the extractor's snake_case column names and all times
+    still in SECONDS; postprocess() renames, rescales and labels it.
+
+    Fix #1: this is a library call.  The cicflowmeter 0.5.0 CLI ("-f file")
+    crashes with "'bool' object has no attribute 'split'", so the CLI is never
+    used.
+    Fix #7: a flow's timeout is checked only when a packet for that flow
+    arrives, plus a periodic sweep of all open flows -- not a full rescan after
+    every FIN, which was quadratic.
+    """
+    import pandas as pd
+
+    flow_timeout_s = config.FLOW_TIMEOUT_S if flow_timeout_s is None else flow_timeout_s
+    activity_timeout_s = config.ACTIVITY_TIMEOUT_S if activity_timeout_s is None \
+        else activity_timeout_s
+    progress_every = config.PROGRESS_EVERY if progress_every is None else progress_every
+    sweep_every = config.SWEEP_EVERY if sweep_every is None else sweep_every
+    rep = rep or Report(echo=show_progress)
+
+    open_flows: dict[tuple, Flow] = {}
+    rows: list[dict[str, Any]] = []
+    packets_total = 0      # every packet in the file
+    packets_ipv4 = 0       # the IPv4 ones, which are the only ones in flows
+    now = 0.0
+
+    def close(flow: Flow) -> None:
+        open_flows.pop(flow.key, None)
+        rows.append(flow.to_row(activity_timeout_s, config.INIT_WIN_ABSENT_VALUE))
+
+    for rec, seen in iter_packet_records(pcap_path):
+        packets_total = seen
+        if rec is None:
+            continue                       # ARP / IPv6 / non-IPv4: excluded
+        packets_ipv4 += 1
+        now = rec.time
+
+        key = flow_key(rec)
+        rkey = reverse_flow_key(rec)
+        flow = open_flows.get(key)
+        forward = True
+        if flow is None:
+            flow = open_flows.get(rkey)
+            forward = flow is None          # stays True only if still not found
+
+        if flow is not None:
+            # per-flow timeout check (fix #7)
+            if (rec.time - flow.start_time) > flow_timeout_s:
+                close(flow)
+                flow = None
+
+        if flow is None:
+            flow = Flow(rec, key)           # first packet added exactly once
+            open_flows[key] = flow
+        else:
+            flow.add(rec, forward)
+
+        if flow.tcp_finished():
+            close(flow)
+
+        if sweep_every and packets_ipv4 % sweep_every == 0:
+            for f in [f for f in open_flows.values()
+                      if (now - f.last_time) > flow_timeout_s]:
+                close(f)
+
+        if progress_every and packets_ipv4 % progress_every == 0:
+            rep.say("      %10s packets read | %7d flows done | %7d flows open"
+                    % (f"{packets_ipv4:,}", len(rows), len(open_flows)))
+
+    for f in list(open_flows.values()):     # flush whatever is still open
+        close(f)
+
+    df = pd.DataFrame(rows)
+    stats = {
+        "pcap": str(pcap_path),
+        "packets_total": packets_total,
+        "packets_ipv4": packets_ipv4,
+        "packets_non_ipv4": packets_total - packets_ipv4,
+        "flows": len(rows),
+        "flow_timeout_s": flow_timeout_s,
+        "activity_timeout_s": activity_timeout_s,
+    }
+    return df, stats
+
+
+# ===========================================================================
+# STAGE C/D -- run one capture, run all six, write the logs
+# ===========================================================================
+def process_capture(pcap_path: Path | str, stem: str,
+                    rep: Report | None = None,
+                    save_raw: bool = True, save_csv: bool = True,
+                    show_progress: bool = True):
+    """pcap -> raw CSV -> final <stem>_flows.csv.  Returns (DataFrame, info).
+
+    Writes CSVs\\raw\\<stem>_raw.csv (exactly what the extractor produced) and
+    CSVs\\<stem>_flows.csv (renamed, rescaled, reordered, labelled).
+    Values are never cleaned: inf, NaN and duplicate rows are kept on purpose.
+    """
+    import time as _time
+
+    rep = rep or Report(echo=show_progress)
+    t0 = _time.perf_counter()
+
+    raw, stats = extract_flows(pcap_path, rep=rep, show_progress=show_progress)
+    if raw.empty:
+        raise ConverterError(
+            "%s produced 0 flows from %d packets -- refusing to write an empty CSV"
+            % (stem, stats["packets_total"]))
+
+    if save_raw:
+        config.RAW_DIR.mkdir(parents=True, exist_ok=True)
+        raw_path = config.RAW_DIR / ("%s_raw.csv" % stem)
+        raw.to_csv(raw_path, index=False)
+        stats["raw_csv"] = str(raw_path)
+
+    df, info = postprocess(raw, stem, rep=Report(echo=False))
+
+    if save_csv:
+        config.CSV_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = config.CSV_OUTPUT_DIR / ("%s_flows.csv" % stem)
+        df.to_csv(out_path, index=False)
+        info["output_csv"] = str(out_path)
+
+    info.update(stats)
+    info["runtime_s"] = round(_time.perf_counter() - t0, 2)
+    return df, info
+
+
+def print_capture_summary(rep: Report, df, info: dict[str, Any]) -> None:
+    """The per-capture block: packets, flows, attackers, top senders, labels."""
+    rep.say("  packets in file      : %s" % f"{info['packets_total']:,}")
+    rep.say("  IPv4 packets (used)  : %s" % f"{info['packets_ipv4']:,}")
+    rep.say("  non-IPv4 (ARP/IPv6)  : %s   <- excluded by design"
+            % f"{info['packets_non_ipv4']:,}")
+    rep.say("  flows                : %s" % f"{info['flows']:,}")
+    rep.say("  shape                : %s" % (df.shape,))
+    rep.say("  runtime              : %.2f s" % info["runtime_s"])
+    rep.say("  dropped columns (%d)  : %s" % (len(info["dropped_columns"]),
+                                              info["dropped_columns"]))
+    rep.say("  label method         : %s" % info["label_method"])
+    rep.say("  attacker IPs         : %s" % (info["attackers"] or "(none - normal capture)"))
+    if info["top_senders"]:
+        rep.say("  top 5 senders by forward packets:")
+        for ip, pkts in list(info["top_senders"].items())[:5]:
+            rep.say("        %-18s %s" % (ip, f"{int(pkts):,}"))
+    rep.say("  label counts         : %s" % info["label_counts"])
+
+
+LOG_FIELDS = ["stem", "status", "output_csv", "raw_csv", "flows",
+              "packets_total", "packets_ipv4", "packets_non_ipv4",
+              "dropped_columns", "label_method", "attackers", "label_counts",
+              "runtime_s", "error"]
+
+LABEL_FIELDS = ["stem", "label", "flows", "share_pct", "attackers",
+                "attacker_count", "label_method", "top_senders"]
+
+
+def run_all(captures: Sequence[CaptureFile] | None = None,
+            overwrite: bool | None = None,
+            rep: Report | None = None,
+            use_tqdm: bool = True,
+            only: Sequence[str] | None = None):
+    """STAGE D: process every capture, write conversion_log.csv + label_report.csv.
+
+    Never skips a capture silently: a failure is recorded with its exact error
+    and reported at the end.
+    """
+    rep = rep or Report()
+    overwrite = config.OVERWRITE if overwrite is None else overwrite
+
+    if captures is None:
+        capture_dir, _why = locate_capture_dir(rep)
+        captures = find_captures(capture_dir) if capture_dir else []
+    todo = [c for c in captures if c.stem in config.CAPTURE_LABELS]
+    if only:
+        todo = [c for c in todo if c.stem in set(only)]
+    skipped_unlabelled = [c.stem for c in captures if c.stem not in config.CAPTURE_LABELS]
+    if skipped_unlabelled:
+        rep.warn("not processed (no label in config.CAPTURE_LABELS): %s" % skipped_unlabelled)
+
+    iterator: Iterable[CaptureFile] = todo
+    if use_tqdm:
+        try:
+            from tqdm.auto import tqdm
+            iterator = tqdm(todo, desc="extracting flows", unit="capture")
+        except ImportError:
+            pass
+
+    log_rows: list[dict[str, Any]] = []
+    label_rows: list[dict[str, Any]] = []
+    frames: dict[str, Any] = {}
+
+    for cap in iterator:
+        pcap = config.PCAP_DIR / output_pcap_name(cap, captures)
+        out_csv = config.CSV_OUTPUT_DIR / ("%s_flows.csv" % cap.stem)
+        row: dict[str, Any] = {k: "" for k in LOG_FIELDS}
+        row["stem"] = cap.stem
+        row["output_csv"] = str(out_csv)
+
+        rep.sub("%s  (%s)" % (cap.stem, config.CAPTURE_LABELS[cap.stem]))
+
+        if not pcap.exists():
+            row["status"] = "failed"
+            row["error"] = "%s does not exist -- run Stage B first" % pcap
+            rep.bad(row["error"])
+            log_rows.append(row)
+            continue
+        if out_csv.exists() and not overwrite:
+            row["status"] = "skipped"
+            row["error"] = "output exists and config.OVERWRITE is False"
+            rep.warn("skipped: %s already exists (OVERWRITE is False)" % out_csv.name)
+            log_rows.append(row)
+            continue
+
+        try:
+            df, info = process_capture(pcap, cap.stem, rep=rep)
+        except Exception as exc:
+            row["status"] = "failed"
+            row["error"] = "%s: %s" % (type(exc).__name__, exc)
+            rep.bad("FAILED: %s" % row["error"])
+            log_rows.append(row)
+            continue
+
+        frames[cap.stem] = df
+        print_capture_summary(rep, df, info)
+        row.update({
+            "status": "success",
+            "raw_csv": info.get("raw_csv", ""),
+            "flows": info["flows"],
+            "packets_total": info["packets_total"],
+            "packets_ipv4": info["packets_ipv4"],
+            "packets_non_ipv4": info["packets_non_ipv4"],
+            "dropped_columns": "|".join(info["dropped_columns"]),
+            "label_method": info["label_method"],
+            "attackers": "|".join(info["attackers"]),
+            "label_counts": json.dumps(info["label_counts"]),
+            "runtime_s": info["runtime_s"],
+        })
+        log_rows.append(row)
+
+        total = max(1, info["flows"])
+        for label, n in sorted(info["label_counts"].items(), key=lambda kv: -kv[1]):
+            label_rows.append({
+                "stem": cap.stem,
+                "label": label,
+                "flows": n,
+                "share_pct": round(100.0 * n / total, 2),
+                "attackers": "|".join(info["attackers"]),
+                "attacker_count": len(info["attackers"]),
+                "label_method": info["label_method"],
+                "top_senders": json.dumps({k: int(v) for k, v in info["top_senders"].items()}),
+            })
+
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _write_dicts(config.CONVERSION_LOG_CSV, LOG_FIELDS, log_rows)
+    _write_dicts(config.LABEL_REPORT_CSV, LABEL_FIELDS, label_rows)
+
+    rep.sub("Stage D summary")
+    n_ok = sum(1 for r in log_rows if r["status"] == "success")
+    n_skip = sum(1 for r in log_rows if r["status"] == "skipped")
+    n_fail = sum(1 for r in log_rows if r["status"] == "failed")
+    total_flows = sum(int(r["flows"] or 0) for r in log_rows if r["status"] == "success")
+    rep.say("  captures attempted : %d" % len(log_rows))
+    rep.say("  successful         : %d" % n_ok)
+    rep.say("  skipped            : %d" % n_skip)
+    rep.say("  failed             : %d" % n_fail)
+    rep.say("  total flows written: %s" % f"{total_flows:,}")
+    rep.say("  output folder      : %s" % config.CSV_OUTPUT_DIR)
+    rep.say("  conversion log     : %s" % config.CONVERSION_LOG_CSV)
+    rep.say("  label report       : %s" % config.LABEL_REPORT_CSV)
+    if n_fail:
+        rep.bad("%d capture(s) FAILED -- none were skipped silently:" % n_fail)
+        for r in log_rows:
+            if r["status"] == "failed":
+                rep.say("          %s: %s" % (r["stem"], r["error"]))
+    return log_rows, label_rows, frames
+
+
+def _write_dicts(path: Path, fields: Sequence[str], rows: Sequence[dict]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(fields))
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in fields})
+    return path
+
+
+# ===========================================================================
+# STAGE D -- verification
+# ===========================================================================
+# Pairs that must satisfy min <= max.
+MIN_MAX_PAIRS = [
+    ("Fwd Pkt Len Min", "Fwd Pkt Len Max"),
+    ("Bwd Pkt Len Min", "Bwd Pkt Len Max"),
+    ("Pkt Len Min", "Pkt Len Max"),
+    ("Flow IAT Min", "Flow IAT Max"),
+    ("Fwd IAT Min", "Fwd IAT Max"),
+    ("Bwd IAT Min", "Bwd IAT Max"),
+    ("Active Min", "Active Max"),
+    ("Idle Min", "Idle Max"),
+]
+
+VERIFICATION_FIELDS = [
+    "stem", "label", "packets_in_pcap", "ipv4_packets_in_flows",
+    "tshark_ipv4_packets", "packet_counts_match", "non_ipv4_gap",
+    "flows", "duplicate_flow_keys", "nan_cells", "negative_cells",
+    "min_gt_max_rows", "invalid_ports", "inf_flow_byts_s", "inf_flow_pkts_s",
+    "identical_feature_rows", "header_matches_flow_columns", "label_counts",
+]
+
+
+def verify_capture(df, stem: str, pcap_path: Path | None = None,
+                   packets_in_pcap: int | None = None,
+                   tshark_ipv4: int | None = None) -> dict[str, Any]:
+    """Every Stage D check for one capture.  Returns a plain dict of counts."""
+    import numpy as np
+
+    feature_cols = [c for c in config.KAGGLE_FEATURES if c in df.columns]
+    numeric = df[feature_cols].apply(lambda s: s.astype("float64"), axis=0)
+
+    # packets: Tot Fwd Pkts + Tot Bwd Pkts summed over flows must equal the
+    # independent IPv4 count.  This is the check that would catch a
+    # double-counted first packet (fix #5) or a dropped protocol (fix #2).
+    ipv4_in_flows = int(df["Tot Fwd Pkts"].sum() + df["Tot Bwd Pkts"].sum())
+    if tshark_ipv4 is None and pcap_path is not None:
+        try:
+            tshark_ipv4 = count_ipv4_packets(pcap_path)
+        except Exception:
+            tshark_ipv4 = None
+
+    # a flow must not be written twice: same 5-tuple AND same start Timestamp
+    key_cols = ["Src IP", "Dst IP", "Src Port", "Dst Port", "Protocol", "Timestamp"]
+    duplicate_keys = int(df.duplicated(subset=key_cols).sum())
+
+    # inf is EXPECTED for zero-duration flows: count it, never fix it
+    inf_byts = int(np.isinf(numeric["Flow Byts/s"]).sum()) if "Flow Byts/s" in numeric else 0
+    inf_pkts = int(np.isinf(numeric["Flow Pkts/s"]).sum()) if "Flow Pkts/s" in numeric else 0
+
+    nan_cells = int(numeric.isna().to_numpy().sum())
+    finite = numeric.replace([np.inf, -np.inf], np.nan)
+    negative_cells = int((finite < 0).to_numpy().sum())
+
+    min_gt_max = 0
+    for lo, hi in MIN_MAX_PAIRS:
+        if lo in df.columns and hi in df.columns:
+            min_gt_max += int((numeric[lo] > numeric[hi]).sum())
+
+    bad_ports = 0
+    for col in ("Src Port", "Dst Port"):
+        p = df[col].astype("int64")
+        bad_ports += int(((p < 0) | (p > 65535)).sum())
+
+    identical = int(df.duplicated(subset=feature_cols).sum())
+
+    return {
+        "stem": stem,
+        "label": config.CAPTURE_LABELS.get(stem, ""),
+        "packets_in_pcap": packets_in_pcap if packets_in_pcap is not None else "",
+        "ipv4_packets_in_flows": ipv4_in_flows,
+        "tshark_ipv4_packets": tshark_ipv4 if tshark_ipv4 is not None else "",
+        "packet_counts_match": (ipv4_in_flows == tshark_ipv4) if tshark_ipv4 is not None else "",
+        "non_ipv4_gap": (packets_in_pcap - ipv4_in_flows)
+                        if packets_in_pcap is not None else "",
+        "flows": len(df),
+        "duplicate_flow_keys": duplicate_keys,
+        "nan_cells": nan_cells,
+        "negative_cells": negative_cells,
+        "min_gt_max_rows": min_gt_max,
+        "invalid_ports": bad_ports,
+        "inf_flow_byts_s": inf_byts,
+        "inf_flow_pkts_s": inf_pkts,
+        "identical_feature_rows": identical,
+        "header_matches_flow_columns": list(df.columns) == config.FLOW_COLUMNS,
+        "label_counts": json.dumps(df[config.LABEL_COLUMN].value_counts().to_dict()),
+    }
+
+
+def verify_all(log_rows: Sequence[dict] | None = None,
+               captures: Sequence[CaptureFile] | None = None,
+               rep: Report | None = None, use_tshark: bool = True):
+    """Build the Stage D verification table from the CSVs on disk."""
+    import pandas as pd
+
+    rep = rep or Report()
+    if captures is None:
+        capture_dir, _why = locate_capture_dir(rep)
+        captures = find_captures(capture_dir) if capture_dir else []
+    by_stem = {r["stem"]: r for r in (log_rows or [])}
+
+    rows: list[dict[str, Any]] = []
+    for cap in captures:
+        out_csv = config.CSV_OUTPUT_DIR / ("%s_flows.csv" % cap.stem)
+        if not out_csv.exists():
+            continue
+        df = pd.read_csv(out_csv, low_memory=False)
+        pcap = config.PCAP_DIR / output_pcap_name(cap, captures)
+        packets = by_stem.get(cap.stem, {}).get("packets_total") or None
+        if packets in ("", None) and pcap.exists():
+            try:
+                packets = count_packets(pcap)
+            except Exception:
+                packets = None
+        rows.append(verify_capture(df, cap.stem,
+                                   pcap_path=pcap if (use_tshark and pcap.exists()) else None,
+                                   packets_in_pcap=int(packets) if packets else None))
+
+    table = pd.DataFrame(rows, columns=VERIFICATION_FIELDS) if rows else pd.DataFrame()
+    if rows:
+        _write_dicts(config.VERIFICATION_CSV, VERIFICATION_FIELDS, rows)
+
+    rep.sub("verification")
+    if not rows:
+        rep.bad("no *_flows.csv found in %s -- run Stage D first" % config.CSV_OUTPUT_DIR)
+        return table
+
+    must_be_zero = ["duplicate_flow_keys", "nan_cells", "negative_cells",
+                    "min_gt_max_rows", "invalid_ports"]
+    for r in rows:
+        problems = [k for k in must_be_zero if int(r[k] or 0) != 0]
+        if r["packet_counts_match"] is False:
+            problems.append("packet_counts_match")
+        if r["header_matches_flow_columns"] is not True:
+            problems.append("header_matches_flow_columns")
+        if problems:
+            rep.bad("%-8s FAILED: %s" % (r["stem"], {k: r[k] for k in problems}))
+        else:
+            rep.ok("%-8s clean (%s flows, %s inf rates, %s identical-feature rows)"
+                   % (r["stem"], f"{r['flows']:,}",
+                      r["inf_flow_byts_s"], r["identical_feature_rows"]))
+    rep.say()
+    rep.say("  'inf' in Flow Byts/s and Flow Pkts/s for zero-duration flows is NORMAL:")
+    rep.say("  it is counted above, never replaced.  Identical 66-feature rows are")
+    rep.say("  expected in floods, scans and brute force: counted, never dropped.")
+    rep.say("  verification table : %s" % config.VERIFICATION_CSV)
+    return table
+
+
+def compare_with_kaggle(rep: Report | None = None):
+    """Reference-only: our per-capture label counts next to the Kaggle file's.
+
+    Returns None when CSV_ORIGINAL holds no Kaggle file, which is not an error:
+    Step 1 never needs it, and nothing in the output depends on it.
+    """
+    import pandas as pd
+
+    rep = rep or Report()
+    ours: dict[str, int] = {}
+    for p in sorted(config.CSV_OUTPUT_DIR.glob("*_flows.csv")):
+        s = pd.read_csv(p, usecols=[config.LABEL_COLUMN], low_memory=False)
+        for label, n in s[config.LABEL_COLUMN].value_counts().items():
+            ours[str(label)] = ours.get(str(label), 0) + int(n)
+    if not ours:
+        rep.bad("no *_flows.csv to compare")
+        return None
+
+    path = config.find_kaggle_file()
+    if path is None:
+        rep.warn("no Kaggle file in %s, so there is nothing to compare against."
+                 % config.KAGGLE_DIR)
+        rep.say("          Our own label totals:")
+        for label, n in sorted(ours.items(), key=lambda kv: -kv[1]):
+            rep.say("            %-18s %s" % (label, f"{n:,}"))
+        return None
+
+    kag = pd.read_excel(path) if path.suffix.lower() in (".xlsx", ".xls") \
+        else pd.read_csv(path, low_memory=False, usecols=lambda c: str(c).strip() == "Label")
+    col = [c for c in kag.columns if str(c).strip() == config.LABEL_COLUMN][0]
+    theirs = {str(k): int(v) for k, v in kag[col].value_counts().items()}
+
+    rep.say("  %-18s %12s %12s   %s" % ("LABEL", "OURS", "KAGGLE", "NOTE"))
+    rep.say("  " + "-" * 62)
+    for label in sorted(set(ours) | set(theirs)):
+        note = ""
+        if label not in theirs:
+            note = "only ours (we create Benign)"
+        elif label not in ours:
+            note = "only Kaggle"
+        rep.say("  %-18s %12s %12s   %s"
+                % (label, f"{ours.get(label, 0):,}", f"{theirs.get(label, 0):,}", note))
+    rep.say()
+    rep.say("  Reference comparison ONLY: the Kaggle file was produced by the Java")
+    rep.say("  CICFlowMeter with its own settings, so the counts are not expected to")
+    rep.say("  be equal and nothing here is adjusted to make them match.")
+    return {"ours": ours, "kaggle": theirs}
