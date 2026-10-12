@@ -1,0 +1,20 @@
+# Requirements for the PCAPNG -> PCAP -> flow-CSV tool (Step 1 of the MSCAD project)
+#
+# IMPORTANT: cicflowmeter 0.5.0 cannot be installed with a plain "pip install -r"
+# on Python 3.13 -- it pins old dependency versions and declares an older
+# python_requires.  Install in TWO steps instead (cmd, quotes matter):
+#
+#   "C:\Users\banot\AppData\Local\Programs\Python\Python313\python.exe" -m pip install scapy numpy scipy pandas requests tqdm
+#   "C:\Users\banot\AppData\Local\Programs\Python\Python313\python.exe" -m pip install cicflowmeter==0.5.0 --no-deps --ignore-requires-python
+#
+# The versions below are the lower bounds this tool was written against.
+
+scapy>=2.5.0        # streaming pcap reading (PcapReader) + packet dissection
+numpy>=1.24         # feature maths
+scipy>=1.10         # required by cicflowmeter's statistics helpers
+pandas>=2.0         # CSV writing, renaming/reordering, verification tables
+requests>=2.28      # a cicflowmeter dependency (we install it ourselves, --no-deps)
+tqdm>=4.65          # per-file progress bars in Stage D
+pytest>=7.4         # tests\test_converter.py (no pcap files needed)
+
+# cicflowmeter==0.5.0   <- install separately, see the two commands above
