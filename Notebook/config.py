@@ -109,6 +109,10 @@ def _resolve_tool(default_path: str, exe_name: str) -> str:
 
 EDITCAP_EXE = _resolve_tool(r"C:\Program Files\Wireshark\editcap.exe", "editcap")
 TSHARK_EXE = _resolve_tool(r"C:\Program Files\Wireshark\tshark.exe", "tshark")
+# capinfos also ships with Wireshark.  It reads only the capture header/index,
+# so counting packets with it is much faster than walking every packet with
+# tshark.  converter.py falls back to tshark if capinfos is absent.
+CAPINFOS_EXE = _resolve_tool(r"C:\Program Files\Wireshark\capinfos.exe", "capinfos")
 
 # ===========================================================================
 # 3. SETTINGS
@@ -402,6 +406,7 @@ def all_paths() -> dict:
         "PYTHON_EXE": Path(PYTHON_EXE),
         "EDITCAP_EXE": Path(EDITCAP_EXE),
         "TSHARK_EXE": Path(TSHARK_EXE),
+        "CAPINFOS_EXE": Path(CAPINFOS_EXE),
     }
 
 
