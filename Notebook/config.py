@@ -125,6 +125,38 @@ IDLE_TIMEOUT_S = 240      # silence that ends an "active" period
 OVERWRITE = False         # False = skip a capture whose output already exists
 PROGRESS_EVERY = 100_000  # print a progress line every N packets
 
+# How often the extractor sweeps ALL open flows for expiry.  Fix #7: stock
+# cicflowmeter re-scanned every open flow after every FIN, which is quadratic
+# and crawls on the port-scan and brute-force captures.  We check only the flow
+# a packet belongs to, plus this periodic sweep as a safety net.
+SWEEP_EVERY = 50_000
+
+# The gap (in seconds) separating an ACTIVE period from an IDLE period.  Used
+# only for the Active*/Idle* features, and taken from IDLE_TIMEOUT_S.
+#
+# HEADS UP: IDLE_TIMEOUT_S (240 s) is LARGER than FLOW_TIMEOUT_S (120 s), and no
+# flow can live longer than 120 s, so a 240 s silent gap can never happen inside
+# one flow.  The consequence is arithmetic, not a bug: every Idle* feature comes
+# out 0 and Active Max equals Flow Duration.  The Java CICFlowMeter pairs
+# flowTimeout = 120 s with a much smaller activityTimeout (5 s by default), and
+# that is what makes its Idle* columns non-zero.  Set ACTIVITY_TIMEOUT_S = 5 if
+# you want populated Idle* features; every run reports which value it used.
+ACTIVITY_TIMEOUT_S = IDLE_TIMEOUT_S
+
+# What "packet length" means for the length features.
+#   "frame" -> captured frame length (includes the 14-byte Ethernet header)
+#   "ip"    -> the IP total-length field (excludes the Ethernet header)
+# "frame" is the captured-bytes definition the spec asks for.  If a later
+# comparison against the Kaggle file shows a constant 14-bytes-per-packet
+# offset, switch this to "ip".
+PACKET_LENGTH_MODE = "frame"
+
+# Value written for Init Fwd/Bwd Win Byts when a direction has no TCP packet.
+# CICFlowMeter writes -1; we write 0 because the Stage D verification requires
+# zero negative values.  Set it to -1 to match CICFlowMeter byte-for-byte.
+INIT_WIN_ABSENT_VALUE = 0
+
+
 # A Src IP is an attacker if its total forward packets are at least
 # ATTACKER_THRESHOLD x the top sender's total forward packets.
 ATTACKER_THRESHOLD = 0.5

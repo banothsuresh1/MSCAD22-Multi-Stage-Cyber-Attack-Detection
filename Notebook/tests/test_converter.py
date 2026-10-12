@@ -480,12 +480,6 @@ def test_read_only_folders_are_never_in_the_create_list():
         assert ro not in config.DIRS_TO_CREATE
 
 
-def test_extract_flows_says_clearly_that_it_is_stage_c():
-    with pytest.raises(NotImplementedError) as err:
-        converter.extract_flows("anything.pcap")
-    assert "Stage C" in str(err.value)
-
-
 def test_postprocess_keeps_inf_and_nan_untouched():
     """Cleaning is a later step: inf and NaN must survive Step 1 unchanged."""
     import numpy as np
@@ -495,3 +489,258 @@ def test_postprocess_keeps_inf_and_nan_untouched():
     df, _info = converter.postprocess(raw, "Scan-1")
     assert np.isinf(df["Flow Byts/s"].iloc[0])
     assert pd.isna(df["Flow Pkts/s"].iloc[1])
+
+
+# ===========================================================================
+# 11. the flow engine, on tiny synthetic captures
+# ===========================================================================
+# These are the only tests that need scapy.  They skip cleanly without it, so
+# the promise "no captures, no Wireshark, no scapy needed" still holds for the
+# 49 tests above.
+scapy = pytest.importorskip("scapy", reason="scapy not installed")
+
+from scapy.layers.inet import ICMP, IP, TCP, UDP     # noqa: E402
+from scapy.layers.l2 import ARP, Ether               # noqa: E402
+from scapy.utils import PcapWriter                   # noqa: E402
+
+BASE_T = 1_600_000_000.0      # a fixed epoch time, so results are reproducible
+
+
+def write_pcap(path: Path, packets) -> Path:
+    """Write (timestamp, packet) pairs to a .pcap file."""
+    with PcapWriter(str(path), linktype=1, sync=True) as w:
+        for t, pkt in packets:
+            pkt.time = t
+            w.write(pkt)
+    return path
+
+
+def tcp(src, dst, sport, dport, flags, payload=b"", window=8192):
+    return Ether() / IP(src=src, dst=dst) / TCP(sport=sport, dport=dport,
+                                                flags=flags, window=window) / payload
+
+
+def handshake_flow(path: Path) -> Path:
+    """A complete 6-packet TCP conversation: SYN, SYN-ACK, data, ACK, FIN, FIN-ACK."""
+    a, b = "192.168.159.20", "192.168.159.30"
+    return write_pcap(path, [
+        (BASE_T + 0.0, tcp(a, b, 44444, 80, "S")),
+        (BASE_T + 0.1, tcp(b, a, 80, 44444, "SA")),
+        (BASE_T + 0.2, tcp(a, b, 44444, 80, "PA", b"GET / HTTP/1.1\r\n\r\n")),
+        (BASE_T + 0.3, tcp(b, a, 80, 44444, "A")),
+        (BASE_T + 0.4, tcp(a, b, 44444, 80, "FA")),
+        (BASE_T + 0.5, tcp(b, a, 80, 44444, "FA")),
+    ])
+
+
+def test_extract_flows_counts_every_packet_exactly_once(tmp_path):
+    """Fix #5: the first packet of a flow must not be counted twice."""
+    handshake_flow(tmp_path / "h.pcap")
+    raw, stats = converter.extract_flows(tmp_path / "h.pcap", show_progress=False)
+
+    assert stats["packets_total"] == 6
+    assert stats["packets_ipv4"] == 6
+    assert len(raw) == 1, "one conversation must be one flow"
+    assert raw["tot_fwd_pkts"].iloc[0] == 3
+    assert raw["tot_bwd_pkts"].iloc[0] == 3
+    # the invariant Stage D checks on the real captures
+    assert raw["tot_fwd_pkts"].sum() + raw["tot_bwd_pkts"].sum() == stats["packets_ipv4"]
+
+
+def test_direction_is_fixed_by_the_first_packet(tmp_path):
+    handshake_flow(tmp_path / "h.pcap")
+    raw, _ = converter.extract_flows(tmp_path / "h.pcap", show_progress=False)
+    row = raw.iloc[0]
+    assert row["src_ip"] == "192.168.159.20"   # the SYN sender is "forward"
+    assert row["src_port"] == 44444
+    assert row["dst_port"] == 80
+    assert row["protocol"] == 6
+
+
+def test_tcp_flags_are_counted_from_the_tcp_layer(tmp_path):
+    handshake_flow(tmp_path / "h.pcap")
+    raw, _ = converter.extract_flows(tmp_path / "h.pcap", show_progress=False)
+    row = raw.iloc[0]
+    assert row["syn_flag_cnt"] == 2          # SYN and SYN-ACK
+    assert row["fin_flag_cnt"] == 2          # FIN both ways
+    assert row["psh_flag_cnt"] == 1          # the one data packet
+    assert row["ack_flag_cnt"] == 5          # every packet after the bare SYN
+    assert row["rst_flag_cnt"] == 0
+    assert row["bwd_psh_flags"] == 0         # the PSH was forward, not backward
+
+
+def test_fin_both_ways_closes_the_flow_without_a_sweep(tmp_path):
+    """Fix #7: closing on FIN must not need a rescan of every open flow."""
+    handshake_flow(tmp_path / "h.pcap")
+    raw, _ = converter.extract_flows(tmp_path / "h.pcap", show_progress=False,
+                                     sweep_every=0)   # sweeping disabled
+    assert len(raw) == 1
+
+
+def test_icmp_flow_is_kept_with_ports_0_and_protocol_1(tmp_path):
+    """Fix #2: stock cicflowmeter dropped every non-TCP/UDP packet."""
+    a, b = "192.168.159.14", "192.168.159.20"
+    write_pcap(tmp_path / "icmp.pcap", [
+        (BASE_T + 0.0, Ether() / IP(src=a, dst=b) / ICMP(type=8) / (b"x" * 56)),
+        (BASE_T + 0.1, Ether() / IP(src=b, dst=a) / ICMP(type=0) / (b"x" * 56)),
+        (BASE_T + 0.2, Ether() / IP(src=a, dst=b) / ICMP(type=8) / (b"x" * 56)),
+    ])
+    raw, stats = converter.extract_flows(tmp_path / "icmp.pcap", show_progress=False)
+
+    assert stats["packets_ipv4"] == 3
+    assert len(raw) == 1
+    row = raw.iloc[0]
+    assert row["src_port"] == 0 and row["dst_port"] == 0
+    assert row["protocol"] == 1
+    assert row["tot_fwd_pkts"] == 2 and row["tot_bwd_pkts"] == 1
+
+
+def test_udp_flow_keeps_its_ports(tmp_path):
+    write_pcap(tmp_path / "udp.pcap", [
+        (BASE_T + 0.0, Ether() / IP(src="10.0.0.1", dst="10.0.0.2")
+                       / UDP(sport=5353, dport=53) / (b"q" * 20)),
+        (BASE_T + 0.2, Ether() / IP(src="10.0.0.2", dst="10.0.0.1")
+                       / UDP(sport=53, dport=5353) / (b"r" * 40)),
+    ])
+    raw, _ = converter.extract_flows(tmp_path / "udp.pcap", show_progress=False)
+    row = raw.iloc[0]
+    assert (row["src_port"], row["dst_port"], row["protocol"]) == (5353, 53, 17)
+    assert row["tot_fwd_pkts"] == 1 and row["tot_bwd_pkts"] == 1
+
+
+def test_arp_and_ipv6_are_excluded_but_still_counted(tmp_path):
+    """The gap between packets-in-file and IPv4-in-flows is ARP/IPv6, by design."""
+    write_pcap(tmp_path / "mixed.pcap", [
+        (BASE_T + 0.0, Ether() / ARP(pdst="192.168.159.1")),
+        (BASE_T + 0.1, Ether() / IP(src="10.0.0.1", dst="10.0.0.2")
+                       / UDP(sport=1, dport=2) / b"x"),
+        (BASE_T + 0.2, Ether() / ARP(pdst="192.168.159.2")),
+    ])
+    raw, stats = converter.extract_flows(tmp_path / "mixed.pcap", show_progress=False)
+    assert stats["packets_total"] == 3
+    assert stats["packets_ipv4"] == 1
+    assert stats["packets_non_ipv4"] == 2
+    assert raw["tot_fwd_pkts"].sum() + raw["tot_bwd_pkts"].sum() == 1
+
+
+def test_flow_timeout_splits_one_conversation_into_two_flows(tmp_path):
+    """Fix #8: a flow is closed 120 s after it started."""
+    a, b = "10.0.0.1", "10.0.0.2"
+    write_pcap(tmp_path / "long.pcap", [
+        (BASE_T + 0.0, tcp(a, b, 1111, 22, "A")),
+        (BASE_T + 10.0, tcp(a, b, 1111, 22, "A")),
+        (BASE_T + 200.0, tcp(a, b, 1111, 22, "A")),   # past the 120 s timeout
+    ])
+    raw, _ = converter.extract_flows(tmp_path / "long.pcap", show_progress=False)
+    assert len(raw) == 2
+    assert sorted(raw["tot_fwd_pkts"].tolist()) == [1, 2]
+
+
+def test_a_single_packet_flow_has_zero_duration_and_inf_rates(tmp_path):
+    """inf is the right answer for a zero-duration flow, and must be kept."""
+    import numpy as np
+    write_pcap(tmp_path / "one.pcap", [
+        (BASE_T, Ether() / IP(src="10.0.0.1", dst="10.0.0.2")
+                 / TCP(sport=1, dport=2, flags="S")),
+    ])
+    raw, _ = converter.extract_flows(tmp_path / "one.pcap", show_progress=False)
+    row = raw.iloc[0]
+    assert row["flow_duration"] == 0.0
+    assert np.isinf(row["flow_byts_s"])
+    assert np.isinf(row["flow_pkts_s"])
+    assert row["flow_iat_mean"] == 0.0        # no gaps to average
+
+
+def test_raw_columns_are_exactly_rename_map_plus_the_expected_extras(tmp_path):
+    handshake_flow(tmp_path / "h.pcap")
+    raw, _ = converter.extract_flows(tmp_path / "h.pcap", show_progress=False)
+    cols = set(raw.columns)
+    assert set(config.RENAME_MAP) <= cols
+    assert sorted(cols - set(config.RENAME_MAP)) == sorted(config.EXPECTED_EXTRA_COLUMNS)
+
+
+def test_end_to_end_one_capture_has_the_exact_mscad_header(tmp_path, monkeypatch):
+    """extract -> rename -> microseconds -> label -> reorder, on a real pcap."""
+    monkeypatch.setattr(config, "CSV_OUTPUT_DIR", tmp_path / "CSVs")
+    monkeypatch.setattr(config, "RAW_DIR", tmp_path / "CSVs" / "raw")
+    handshake_flow(tmp_path / "N-0.pcap")
+
+    df, info = converter.process_capture(tmp_path / "N-0.pcap", "N-0", show_progress=False)
+
+    assert list(df.columns) == config.FLOW_COLUMNS
+    assert len(df) == 1
+    assert set(df[config.LABEL_COLUMN]) == {"Normal"}
+    # 0.5 s of wall clock -> 500000 microseconds
+    assert df["Flow Duration"].iloc[0] == pytest.approx(500_000, rel=1e-6)
+    assert (tmp_path / "CSVs" / "raw" / "N-0_raw.csv").exists()
+    assert (tmp_path / "CSVs" / "N-0_flows.csv").exists()
+    assert info["packets_ipv4"] == 6
+
+
+def test_verification_is_clean_on_a_synthetic_capture(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CSV_OUTPUT_DIR", tmp_path / "CSVs")
+    monkeypatch.setattr(config, "RAW_DIR", tmp_path / "CSVs" / "raw")
+    handshake_flow(tmp_path / "Scan-1.pcap")
+
+    df, info = converter.process_capture(tmp_path / "Scan-1.pcap", "Scan-1",
+                                         show_progress=False)
+    v = converter.verify_capture(df, "Scan-1", packets_in_pcap=info["packets_total"],
+                                 tshark_ipv4=info["packets_ipv4"])
+
+    assert v["ipv4_packets_in_flows"] == info["packets_ipv4"]
+    assert v["packet_counts_match"] is True
+    assert v["duplicate_flow_keys"] == 0
+    assert v["nan_cells"] == 0
+    assert v["negative_cells"] == 0
+    assert v["min_gt_max_rows"] == 0
+    assert v["invalid_ports"] == 0
+    assert v["header_matches_flow_columns"] is True
+
+
+def test_idle_features_are_zero_with_a_240s_activity_timeout(tmp_path):
+    """Documented consequence: ACTIVITY_TIMEOUT_S (240 s) > FLOW_TIMEOUT_S (120 s).
+
+    No flow can contain a 240 s gap, so every Idle* feature is 0 and
+    Active Max equals the flow duration.  Lower ACTIVITY_TIMEOUT_S to change it.
+    """
+    a, b = "10.0.0.1", "10.0.0.2"
+    write_pcap(tmp_path / "gap.pcap", [
+        (BASE_T + 0.0, tcp(a, b, 1, 2, "A")),
+        (BASE_T + 30.0, tcp(a, b, 1, 2, "A")),     # a 30 s gap
+    ])
+    raw, _ = converter.extract_flows(tmp_path / "gap.pcap", show_progress=False)
+    row = raw.iloc[0]
+    assert config.ACTIVITY_TIMEOUT_S == 240
+    assert row["idle_max"] == 0.0 and row["idle_mean"] == 0.0
+    assert row["active_max"] == pytest.approx(30.0)
+    assert row["flow_duration"] == pytest.approx(30.0)
+
+    # with a 5 s threshold the same gap becomes an idle period
+    raw5, _ = converter.extract_flows(tmp_path / "gap.pcap", show_progress=False,
+                                      activity_timeout_s=5)
+    assert raw5.iloc[0]["idle_max"] == pytest.approx(30.0)
+
+
+def test_first_capture_in_a_fresh_process_is_not_decoded_as_raw(tmp_path):
+    """Regression: scapy resolves the link-layer class when the file is OPENED.
+
+    If scapy.layers.l2 is not imported before PcapReader opens the file, link
+    type 1 (Ethernet) is unknown, every packet decodes as Raw, "IP in pkt" is
+    False and the capture yields 0 flows.  That only bit the FIRST capture of a
+    process, so it has to be checked in a fresh interpreter.
+    """
+    import subprocess
+    import sys as _sys
+
+    handshake_flow(tmp_path / "first.pcap")
+    code = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from src import converter\n"
+        "raw, stats = converter.extract_flows(%r, show_progress=False)\n"
+        "assert stats['packets_ipv4'] == 6, stats\n"
+        "assert len(raw) == 1, len(raw)\n"
+        "print('OK')\n"
+    ) % (str(Path(converter.__file__).parent.parent), str(tmp_path / "first.pcap"))
+    res = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "OK" in res.stdout

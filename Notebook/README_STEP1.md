@@ -39,8 +39,8 @@ It writes `Notebook\stage_a_report.txt`, a copy of everything it printed.
 |-------|--------------|-------|
 | A | disk layout, old converter code, inventory, environment, Kaggle header | **ready** - notebook cells 2-5, or `stage_a_check.py` |
 | B | pcapng -> pcap with `editcap` + packet-count verification + inventory CSV | **ready** - notebook cell 6 |
-| C | the patched flow extractor (`converter.extract_flows`) + N-0 test run | **pending** - post-processing, labelling and tests are done; the flow table itself is not |
-| D | all six captures + verification table | **pending** - needs Stage C |
+| C | the patched flow extractor + N-0 test run | **ready** - notebook cells 7, 7b |
+| D | all six captures + verification table | **ready** - notebook cells 8-12 |
 
 ## Files
 
@@ -50,9 +50,9 @@ It writes `Notebook\stage_a_report.txt`, a copy of everything it printed.
 | `MSCAD_Pipeline.ipynb` | **skeleton only** - title, setup cell, one empty header per Stage 2-8. No code. |
 | `config.py` | every path and setting. The only file with hard-coded paths. |
 | `stage_a_check.py` | 26-line wrapper that runs the Stage A checks from cmd. |
-| `src\converter.py` | all Step 1 logic: discovery, editcap, post-processing, labelling. |
+| `src\converter.py` | all Step 1 logic: discovery, editcap, the flow engine, post-processing, labelling, verification. |
 | `src\mscad\*.py` | Stage 2-8 stubs: a docstring and nothing else. |
-| `tests\test_converter.py` | 49 pytest tests. No captures, no Wireshark, no scapy needed. |
+| `tests\test_converter.py` | 62 pytest tests. The first 49 need no captures, no Wireshark and no scapy; the last 13 build tiny synthetic captures and skip if scapy is absent. |
 | `requirements.txt` | Step 1 packages + the separate cicflowmeter line + later stages commented out. |
 | `outputs\step1\` | pcap_inventory.csv (B), conversion_log.csv / label_report.csv / verification.csv (C/D) |
 
@@ -61,3 +61,19 @@ It writes `Notebook\stage_a_report.txt`, a copy of everything it printed.
 No merging of the CSVs, no cleaning (`inf` / `NaN` / duplicates are kept), no
 encoding, scaling, splitting, feature selection, windowing or training. Those are
 Step 2 onward, and `MSCAD_Pipeline.ipynb` stays a skeleton until then.
+
+## Two settings worth knowing about
+
+**`ACTIVITY_TIMEOUT_S` is 240 s, taken from `IDLE_TIMEOUT_S`, while
+`FLOW_TIMEOUT_S` is 120 s.** No flow can live longer than 120 s, so a 240 s
+silent gap can never occur inside one flow. The arithmetic consequence is that
+every `Idle*` feature comes out **0** and `Active Max` equals `Flow Duration`.
+The Java CICFlowMeter pairs a 120 s flow timeout with a much smaller activity
+timeout (5 s by default), which is what makes its `Idle*` columns non-zero. Set
+`ACTIVITY_TIMEOUT_S = 5` in `config.py` if you want populated `Idle*` features.
+Every run prints which value it used.
+
+**`PACKET_LENGTH_MODE = "frame"`** means packet lengths are captured frame bytes,
+including the 14-byte Ethernet header, which is the captured-bytes definition the
+spec asks for. If a later comparison against the Kaggle file shows a constant
+14-bytes-per-packet offset, switch it to `"ip"`.
