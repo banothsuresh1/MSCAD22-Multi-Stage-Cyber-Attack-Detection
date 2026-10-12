@@ -995,6 +995,10 @@ class PacketRecord:
     payload_len: int = 0
     header_len: int = 0
     window: int = 0
+    # True when this packet is an IP fragment (MF set, or a non-zero offset):
+    # its transport header is partial or absent, so the ports were read from
+    # the raw bytes or inherited from the datagram's first fragment.
+    fragmented: bool = False
 
     # --- TCP flag helpers.  Fix #4: these read the TCP flag byte, NOT the IP
     # --- flags field, which is what stock cicflowmeter wrongly looked at.
@@ -1054,49 +1058,125 @@ def reverse_flow_key(rec: PacketRecord) -> tuple[str, str, int, int, int]:
     return (dst, src, dp, sp, proto)
 
 
-def packet_record_from_scapy(pkt) -> PacketRecord | None:
+# How many (src, dst, proto, ip-id) -> ports entries to remember while matching
+# fragments.  Fragments of one datagram arrive close together, so this only has
+# to cover the packets in flight; when it fills up, the oldest half is dropped.
+FRAG_PORT_CACHE_MAX = 200_000
+
+
+def _remember_frag_ports(cache: dict, key: tuple, ports: tuple) -> None:
+    """Store the ports of a fragmented datagram, keeping the cache bounded."""
+    if len(cache) >= FRAG_PORT_CACHE_MAX:
+        for old_key in list(cache)[: FRAG_PORT_CACHE_MAX // 2]:
+            del cache[old_key]
+    cache[key] = ports
+
+
+def packet_record_from_scapy(pkt, frag_ports: dict | None = None) -> PacketRecord | None:
     """Turn one scapy packet into a PacketRecord, or None if it is not IPv4.
 
-    scapy is imported lazily so this module (and the test suite) still work on a
-    machine where scapy is not installed.
+    scapy is imported lazily so this module (and most of the test suite) still
+    work on a machine where scapy is not installed.
+
+    IP FRAGMENTS
+    ------------
+    scapy does no reassembly, so a fragmented TCP/UDP datagram has NO usable
+    transport layer:
+      * the FIRST fragment (offset 0) carries the start of the transport
+        header.  A scan using small fragments gives it as little as 4 bytes --
+        too short for scapy to build a TCP layer, but the source and
+        destination ports ARE exactly those first 4 bytes, so we read them.
+      * LATER fragments (offset > 0) carry no header at all.  They are matched
+        to their own datagram by (src, dst, protocol, IP id) and inherit its
+        ports.
+
+    Without this every fragment fell through to the "no ports" branch at the
+    bottom, and they all collapsed into one bogus flow with ports 0/0.  In the
+    MSCAD Scan-1 capture that was 8,028 packets -- about 4,014 real scan probes
+    -- hidden inside a single row.
+
+    A fragment whose first piece was never seen (a truncated capture, or
+    out-of-order arrival) keeps ports 0/0, which is honest: the ports genuinely
+    are not knowable from the data.
     """
+    import struct
+
     from scapy.layers.inet import ICMP, IP, TCP, UDP   # noqa: WPS433 (lazy on purpose)
 
     if IP not in pkt:
         return None            # ARP / IPv6 / anything else: excluded by design
     ip = pkt[IP]
-    # Fix: packet length is the CAPTURED byte count.  len(pkt) would re-serialise
-    # the packet, which is slow and can disagree with what is on the wire.
+    # Packet length is the CAPTURED byte count.  len(bytes(pkt)) would
+    # re-serialise the packet, which is slower and can disagree with the wire.
     cap_len = len(bytes(pkt)) if not hasattr(pkt, "wirelen") or pkt.wirelen is None \
         else int(pkt.wirelen)
     ip_header_len = int(ip.ihl) * 4 if getattr(ip, "ihl", None) else 20
 
+    # IP flags bit 0 is MF ("more fragments"); ip.frag is the offset in 8-byte
+    # units.  Either being set means this packet is part of a larger datagram.
+    frag_offset = int(getattr(ip, "frag", 0) or 0)
+    more_fragments = bool(int(getattr(ip, "flags", 0) or 0) & 0x01)
+    is_fragment = more_fragments or frag_offset > 0
+    proto = int(ip.proto)
+    frag_key = (str(ip.src), str(ip.dst), proto, int(getattr(ip, "id", 0) or 0))
+
     if TCP in pkt:
         t = pkt[TCP]
         tcp_header_len = int(t.dataofs) * 4 if getattr(t, "dataofs", None) else 20
+        if is_fragment and frag_ports is not None:
+            _remember_frag_ports(frag_ports, frag_key, (int(t.sport), int(t.dport)))
         return PacketRecord(
             time=float(pkt.time), cap_len=cap_len,
             src_ip=str(ip.src), dst_ip=str(ip.dst),
             src_port=int(t.sport), dst_port=int(t.dport), protocol=PROTO_TCP,
             flags=int(t.flags), payload_len=len(bytes(t.payload)),
             header_len=ip_header_len + tcp_header_len, window=int(t.window),
+            fragmented=is_fragment,
         )
     if UDP in pkt:
         u = pkt[UDP]
+        if is_fragment and frag_ports is not None:
+            _remember_frag_ports(frag_ports, frag_key, (int(u.sport), int(u.dport)))
         return PacketRecord(
             time=float(pkt.time), cap_len=cap_len,
             src_ip=str(ip.src), dst_ip=str(ip.dst),
             src_port=int(u.sport), dst_port=int(u.dport), protocol=PROTO_UDP,
             flags=0, payload_len=max(0, int(u.len) - 8),
             header_len=ip_header_len + 8, window=0,
+            fragmented=is_fragment,
         )
-    # ICMP and every other IPv4 protocol: ports 0, real protocol number.
+
+    # No transport layer.  For TCP/UDP that means a fragment: recover the ports.
+    if proto in (PROTO_TCP, PROTO_UDP) and frag_ports is not None:
+        payload = bytes(ip.payload)
+        if frag_offset == 0 and len(payload) >= 4:
+            # the FIRST fragment: its first 4 bytes ARE the two port numbers
+            ports = struct.unpack("!HH", payload[:4])
+            _remember_frag_ports(frag_ports, frag_key, ports)
+        else:
+            # a LATER fragment: inherit the ports of its own datagram
+            ports = frag_ports.get(frag_key)
+        if ports is not None:
+            return PacketRecord(
+                time=float(pkt.time), cap_len=cap_len,
+                src_ip=str(ip.src), dst_ip=str(ip.dst),
+                src_port=int(ports[0]), dst_port=int(ports[1]), protocol=proto,
+                flags=0,
+                # the transport header is partial or missing, so there is no
+                # trustworthy payload length and no window size
+                payload_len=0, header_len=ip_header_len, window=0,
+                fragmented=True,
+            )
+
+    # ICMP, other IP protocols, and fragments whose first piece was never seen:
+    # ports 0, real protocol number.
     return PacketRecord(
         time=float(pkt.time), cap_len=cap_len,
         src_ip=str(ip.src), dst_ip=str(ip.dst),
-        src_port=0, dst_port=0, protocol=int(ip.proto),
+        src_port=0, dst_port=0, protocol=proto,
         flags=0, payload_len=len(bytes(ip.payload.payload)) if ICMP in pkt else 0,
         header_len=ip_header_len + (8 if ICMP in pkt else 0), window=0,
+        fragmented=is_fragment,
     )
 
 
@@ -1323,6 +1403,7 @@ class Flow:
         self.fwd_payload_bytes = 0
         self.bwd_payload_bytes = 0
         self.fwd_act_data_pkts = 0
+        self.frag_pkts = 0          # how many packets of this flow were fragments
 
         # flag counters over the whole flow (CICFlowMeter counts packets)
         self.fin = self.syn = self.rst = self.psh = 0
@@ -1343,6 +1424,8 @@ class Flow:
     def add(self, rec: PacketRecord, forward: bool) -> None:
         self.last_time = rec.time
         self.all_times.append(rec.time)
+        if rec.fragmented:
+            self.frag_pkts += 1
 
         if forward:
             self.fwd_lens.append(rec.cap_len)
@@ -1555,6 +1638,10 @@ class Flow:
             "bwd_byts_b_avg": 0,
             "bwd_pkts_b_avg": 0,
             "bwd_blk_rate_avg": 0,
+            # Not an MSCAD column, so it is dropped from <stem>_flows.csv and
+            # listed in the conversion log -- but it survives in
+            # CSVs\\raw\\<stem>_raw.csv, so fragmented flows stay identifiable.
+            "fragmented_pkts": self.frag_pkts,
         }
 
 
@@ -1585,9 +1672,13 @@ def iter_packet_records(pcap_path: Path | str):
     import scapy.layers.l2  # noqa: F401  (registers Ether for link-type 1)
     from scapy.utils import PcapReader
 
+    # (src, dst, proto, ip-id) -> (src port, dst port), so the later fragments
+    # of a datagram can find the ports carried by its first fragment.
+    frag_ports: dict[tuple, tuple] = {}
+
     with PcapReader(str(pcap_path)) as reader:
         for seen, pkt in enumerate(reader, start=1):
-            rec = packet_record_from_scapy(pkt)
+            rec = packet_record_from_scapy(pkt, frag_ports=frag_ports)
             yield rec, seen
 
 

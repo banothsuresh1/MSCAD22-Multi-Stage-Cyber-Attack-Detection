@@ -77,3 +77,27 @@ Every run prints which value it used.
 including the 14-byte Ethernet header, which is the captured-bytes definition the
 spec asks for. If a later comparison against the Kaggle file shows a constant
 14-bytes-per-packet offset, switch it to `"ip"`.
+
+## Known issue fixed after the first full run: IP fragments
+
+The first run of Step 1 produced one bogus flow per capture pair whenever the
+traffic was IP-fragmented. scapy does no reassembly, so a fragmented TCP or UDP
+datagram has no usable transport header; every such packet fell into the
+"no ports" branch and they all collapsed into a single flow with ports 0/0.
+
+In the real `Scan-1` capture that was **8,028 packets - 20.8% of its IPv4
+traffic, roughly 4,014 real scan probes - inside one row.**
+
+`packet_record_from_scapy()` now reads the ports straight out of the first
+fragment's raw bytes (the source and destination ports are literally its first
+4 bytes, and the scanner's 38-byte frames carry exactly those 4) and matches
+later fragments to their datagram by `(src, dst, protocol, IP id)`. A fragment
+whose first piece was never seen still gets ports 0/0, because the ports really
+are unknowable then.
+
+A `fragmented_pkts` count is written to `CSVs\raw\<stem>_raw.csv` so these
+flows stay identifiable; it is dropped from `<stem>_flows.csv`, which keeps its
+exact 73 columns.
+
+**If your flow CSVs were produced before this fix, re-run Step 1 with
+`config.OVERWRITE = True`, then re-run Step 2.**

@@ -744,3 +744,143 @@ def test_first_capture_in_a_fresh_process_is_not_decoded_as_raw(tmp_path):
     res = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     assert "OK" in res.stdout
+
+
+# ===========================================================================
+# 12. IP fragments -- the Scan-1 defect
+# ===========================================================================
+# In the real Scan-1 capture the scanner fragmented each TCP probe into two
+# pieces, neither carrying a complete 20-byte TCP header.  scapy could not build
+# a TCP layer for either, so all 8,028 fragment packets collapsed into ONE flow
+# with ports 0/0 -- roughly 4,014 real scan probes hidden in a single row.
+import struct  # noqa: E402
+
+
+def frag_probe(src, dst, sport, dport, ip_id, first_bytes=4):
+    """One TCP probe split into two fragments, as the Scan-1 scanner did it.
+
+    The first fragment carries only `first_bytes` of the TCP header (4 is what
+    the real capture used -- exactly the two port numbers, giving a 38-byte
+    frame). The second carries the rest and has no header at all.
+    """
+    head = struct.pack("!HH", sport, dport) + b"\x00" * max(0, first_bytes - 4)
+    first = Ether() / IP(src=src, dst=dst, proto=6, id=ip_id, flags="MF", frag=0) / head
+    rest = Ether() / IP(src=src, dst=dst, proto=6, id=ip_id, frag=1) / (b"\x00" * 8)
+    return first, rest
+
+
+def test_scapy_really_cannot_parse_a_short_first_fragment():
+    """The premise of the fix: this is why the ports had to be read by hand."""
+    first, rest = frag_probe("10.0.0.1", "10.0.0.2", 50000, 80, 4321)
+    first = Ether(bytes(first))             # as PcapReader would deliver it
+    assert TCP not in first, "if scapy could parse it, the fix is unnecessary"
+    assert len(bytes(first)) == 38          # the Scan-1 'Fwd Pkt Len Min'
+
+
+def test_first_fragment_ports_are_read_from_the_raw_bytes():
+    first, _rest = frag_probe("10.0.0.1", "10.0.0.2", 50000, 80, 4321)
+    cache = {}
+    rec = converter.packet_record_from_scapy(Ether(bytes(first)), frag_ports=cache)
+    assert (rec.src_port, rec.dst_port) == (50000, 80)
+    assert rec.protocol == 6
+    assert rec.fragmented is True
+    assert cache[("10.0.0.1", "10.0.0.2", 6, 4321)] == (50000, 80)
+
+
+def test_later_fragment_inherits_the_ports_through_the_ip_id():
+    first, rest = frag_probe("10.0.0.1", "10.0.0.2", 50000, 80, 4321)
+    cache = {}
+    converter.packet_record_from_scapy(Ether(bytes(first)), frag_ports=cache)
+    rec = converter.packet_record_from_scapy(Ether(bytes(rest)), frag_ports=cache)
+    assert (rec.src_port, rec.dst_port) == (50000, 80)
+    assert rec.fragmented is True
+    # both pieces therefore belong to the SAME flow
+    assert converter.flow_key(rec) == ("10.0.0.1", "10.0.0.2", 50000, 80, 6)
+
+
+def test_an_orphan_fragment_keeps_ports_0_rather_than_inventing_them():
+    """A later fragment whose first piece was never seen must NOT guess."""
+    _first, rest = frag_probe("10.0.0.1", "10.0.0.2", 50000, 80, 4321)
+    rec = converter.packet_record_from_scapy(Ether(bytes(rest)), frag_ports={})
+    assert (rec.src_port, rec.dst_port) == (0, 0)
+    assert rec.protocol == 6
+    assert rec.fragmented is True
+
+
+def test_fragments_of_different_datagrams_do_not_share_a_flow():
+    """Different IP ids -> different datagrams -> different flows."""
+    cache = {}
+    keys = []
+    for i, (sport, dport, ip_id) in enumerate([(50000, 80, 1), (50001, 443, 2)]):
+        first, rest = frag_probe("10.0.0.1", "10.0.0.2", sport, dport, ip_id)
+        for piece in (first, rest):
+            rec = converter.packet_record_from_scapy(Ether(bytes(piece)), frag_ports=cache)
+            keys.append(converter.flow_key(rec))
+    assert keys[0] == keys[1] == ("10.0.0.1", "10.0.0.2", 50000, 80, 6)
+    assert keys[2] == keys[3] == ("10.0.0.1", "10.0.0.2", 50001, 443, 6)
+    assert keys[0] != keys[2]
+
+
+def test_a_fragmented_port_scan_yields_one_flow_per_probe_not_one_blob(tmp_path):
+    """The regression that matters: 10 probes must be 10 flows, not 1."""
+    packets = []
+    for i in range(10):
+        first, rest = frag_probe("192.168.159.1", "192.168.159.131",
+                                 50000 + i, 1 + i, ip_id=1000 + i)
+        packets.append((BASE_T + i * 0.01, first))
+        packets.append((BASE_T + i * 0.01 + 0.001, rest))
+    write_pcap(tmp_path / "frag.pcap", packets)
+
+    raw, stats = converter.extract_flows(tmp_path / "frag.pcap", show_progress=False)
+
+    assert stats["packets_ipv4"] == 20
+    assert len(raw) == 10, "each probe must be its own flow"
+    assert raw["tot_fwd_pkts"].sum() + raw["tot_bwd_pkts"].sum() == 20
+    assert sorted(raw["dst_port"]) == list(range(1, 11))
+    assert set(raw["src_port"]) == set(range(50000, 50010))
+    assert (raw["protocol"] == 6).all()
+    assert (raw["src_port"] > 0).all(), "no flow may be left with port 0"
+    assert (raw["fragmented_pkts"] == 2).all()
+
+
+def test_fragmented_pkts_is_dropped_from_the_output_but_kept_in_raw(tmp_path):
+    packets = []
+    for i in range(3):
+        first, rest = frag_probe("192.168.159.1", "192.168.159.131",
+                                 50000 + i, 1 + i, ip_id=2000 + i)
+        packets.append((BASE_T + i * 0.01, first))
+        packets.append((BASE_T + i * 0.01 + 0.001, rest))
+    write_pcap(tmp_path / "Scan-1.pcap", packets)
+
+    raw, _ = converter.extract_flows(tmp_path / "Scan-1.pcap", show_progress=False)
+    assert "fragmented_pkts" in raw.columns
+
+    df, info = converter.postprocess(raw, "Scan-1")
+    assert list(df.columns) == config.FLOW_COLUMNS          # still exactly 73
+    assert "fragmented_pkts" not in df.columns
+    assert "fragmented_pkts" in info["dropped_columns"]
+
+
+def test_unfragmented_traffic_is_unaffected(tmp_path):
+    """The fix must not change anything for ordinary packets."""
+    handshake_flow(tmp_path / "h.pcap")
+    raw, stats = converter.extract_flows(tmp_path / "h.pcap", show_progress=False)
+    assert len(raw) == 1
+    assert raw["tot_fwd_pkts"].iloc[0] == 3 and raw["tot_bwd_pkts"].iloc[0] == 3
+    assert raw["fragmented_pkts"].iloc[0] == 0
+    assert raw["src_port"].iloc[0] == 44444
+
+
+def test_fragmented_icmp_still_gets_ports_0_and_protocol_1(tmp_path):
+    """App-02's fragmented pings: ICMP has no ports, so 0/0 stays correct."""
+    a, b = "192.168.159.14", "192.168.159.20"
+    first = Ether() / IP(src=a, dst=b, proto=1, id=77, flags="MF", frag=0) / (b"\x08" * 8)
+    rest = Ether() / IP(src=a, dst=b, proto=1, id=77, frag=1) / (b"\x00" * 8)
+    write_pcap(tmp_path / "icmpfrag.pcap", [(BASE_T, first), (BASE_T + 0.01, rest)])
+
+    raw, stats = converter.extract_flows(tmp_path / "icmpfrag.pcap", show_progress=False)
+    assert stats["packets_ipv4"] == 2
+    assert len(raw) == 1
+    assert raw["src_port"].iloc[0] == 0 and raw["dst_port"].iloc[0] == 0
+    assert raw["protocol"].iloc[0] == 1
+    assert raw["fragmented_pkts"].iloc[0] == 2

@@ -412,6 +412,7 @@ EXPECTED_EXTRA_COLUMNS = [
     "bwd_byts_b_avg",
     "bwd_pkts_b_avg",
     "bwd_blk_rate_avg",
+    "fragmented_pkts",      # how many packets of the flow were IP fragments
 ]
 
 # Time features that must be converted from SECONDS to MICROSECONDS so they
