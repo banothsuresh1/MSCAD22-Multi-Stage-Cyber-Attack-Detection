@@ -35,7 +35,11 @@ from pathlib import Path
 # can run on a machine without a C:\ drive.  On your PC they are not set and
 # the literal paths below are used.
 DATA_ROOT = Path(os.environ.get("MSCAD_DATA_ROOT", r"C:\MSCAD2022"))
-PROJECT_ROOT = Path(os.environ.get("MSCAD_PROJECT_ROOT", str(DATA_ROOT / "Notebook")))
+# PROJECT_ROOT is the folder this file sits in, so the project works wherever you
+# keep the code (C:\MSCAD2022\Notebook, or a git clone) with nothing to edit.
+PROJECT_ROOT = Path(os.environ.get("MSCAD_PROJECT_ROOT",
+                                   str(Path(__file__).resolve().parent)))
+NOTEBOOKS_DIR = PROJECT_ROOT / "notebooks"
 
 # INPUT -- read-only.  Never modified, moved, renamed or deleted by this project.
 PCAPNG_DIR = DATA_ROOT / "PCAPNG_ORIGINAL"
@@ -62,6 +66,24 @@ CONVERSION_LOG_CSV = OUTPUT_DIR / "conversion_log.csv"   # Stage D
 LABEL_REPORT_CSV = OUTPUT_DIR / "label_report.csv"       # Stage C/D
 VERIFICATION_CSV = OUTPUT_DIR / "verification.csv"       # Stage D
 
+# ---------------------------------------------------------------------------
+# STEP 2 -- load and merge the per-capture flow CSVs
+# ---------------------------------------------------------------------------
+# Only the Step 1 outputs match this pattern, so CSVs\raw\*_raw.csv and any
+# other file in the folder are ignored.
+FLOW_CSV_PATTERN = "*_flows.csv"
+
+MERGED_CSV = MERGED_DIR / "MSCAD_merged.csv"
+MERGED_PARQUET = MERGED_DIR / "MSCAD_merged.parquet"
+STEP2_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "step2"
+
+# The order the captures are concatenated in: the chronological order of the
+# attack scenario, so the merged file reads like the session it came from.
+CAPTURE_ORDER = ["N-0", "Scan-1", "App-01", "App-02", "W-B-01", "W-B-02"]
+
+# False = keep an existing merged file and skip the save.
+OVERWRITE_MERGED = False
+
 # Every folder this project is allowed to create.  PCAPNG_DIR and KAGGLE_DIR
 # are deliberately NOT in this list.
 DIRS_TO_CREATE = [
@@ -74,6 +96,8 @@ DIRS_TO_CREATE = [
     TESTS_DIR,
     MERGED_DIR,
     OUTPUT_DIR,
+    STEP2_OUTPUT_DIR,
+    NOTEBOOKS_DIR,
 ]
 
 # Folders that must never be written to.
@@ -256,6 +280,15 @@ LABEL_COLUMN = "Label"
 # The exact header, in the exact order, that EVERY output CSV must have.
 # 6 identifiers + 66 features + Label = 73 columns.
 FLOW_COLUMNS = ID_COLUMNS + KAGGLE_FEATURES + [LABEL_COLUMN]
+
+# Bookkeeping columns Step 2 adds on top of FLOW_COLUMNS:
+#   Source_Capture -- which capture the flow came from (from the file name)
+#   Orig_Row       -- the row's position inside its own file, so a merged row
+#                     can always be traced back to its source CSV
+#   Timestamp_dt   -- the Timestamp text parsed into a real datetime.  The
+#                     original text column is KEPT, untouched, as well.
+MERGE_EXTRA_COLUMNS = ["Source_Capture", "Orig_Row", "Timestamp_dt"]
+MERGED_COLUMNS = FLOW_COLUMNS + MERGE_EXTRA_COLUMNS
 
 # ---------------------------------------------------------------------------
 # RENAME_MAP: extractor name (snake_case)  ->  MSCAD name
