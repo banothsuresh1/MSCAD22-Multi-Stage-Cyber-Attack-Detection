@@ -884,3 +884,54 @@ def test_fragmented_icmp_still_gets_ports_0_and_protocol_1(tmp_path):
     assert raw["src_port"].iloc[0] == 0 and raw["dst_port"].iloc[0] == 0
     assert raw["protocol"].iloc[0] == 1
     assert raw["fragmented_pkts"].iloc[0] == 2
+
+
+# ===========================================================================
+# 13. the modules must import on an older interpreter too
+# ===========================================================================
+# The Jupyter kernel is not always config.PYTHON_EXE: it may be a conda env on
+# an older Python.  dataclass(slots=True) needs 3.10 and once broke the import
+# that way, so these guard against the whole class of problem.
+def test_no_python_310_plus_only_runtime_constructs():
+    import re
+
+    project = Path(converter.__file__).parent.parent
+    offenders = []
+    patterns = [
+        (r"@dataclass\(slots=True\)", "dataclass(slots=True) needs Python 3.10"),
+        (r"\bmatch\s+\w+\s*:\s*$", "match statement needs Python 3.10"),
+        (r"zip\([^)]*strict=", "zip(strict=) needs Python 3.10"),
+        (r"except\*", "except* needs Python 3.11"),
+        (r"\bExceptionGroup\b", "ExceptionGroup needs Python 3.11"),
+        (r"\btomllib\b", "tomllib needs Python 3.11"),
+        (r"typing\.Self|from typing import.*\bSelf\b", "typing.Self needs Python 3.11"),
+    ]
+    for path in [project / "config.py", project / "src" / "converter.py",
+                 project / "src" / "mscad" / "data_loading.py"]:
+        text = path.read_text(encoding="utf-8")
+        for pattern, why in patterns:
+            for match in re.finditer(pattern, text, re.MULTILINE):
+                line = text[: match.start()].count("\n") + 1
+                offenders.append(f"{path.name}:{line} {why}")
+    assert offenders == [], "\n".join(offenders)
+
+
+def test_modules_use_future_annotations():
+    """Without it, `X | None` in a signature is evaluated and breaks on 3.9."""
+    import ast
+
+    project = Path(converter.__file__).parent.parent
+    for path in [project / "config.py", project / "src" / "converter.py",
+                 project / "src" / "mscad" / "data_loading.py"]:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        ok = any(isinstance(node, ast.ImportFrom) and node.module == "__future__"
+                 and any(alias.name == "annotations" for alias in node.names)
+                 for node in tree.body)
+        assert ok, f"{path.name} is missing 'from __future__ import annotations'"
+
+
+def test_packet_record_works_whether_or_not_it_has_slots():
+    rec = converter.PacketRecord(time=1.0, cap_len=60, src_ip="a", dst_ip="b",
+                                 src_port=1, dst_port=2, protocol=6)
+    assert rec.cap_len == 60 and rec.fragmented is False
+    assert converter.flow_key(rec) == ("a", "b", 1, 2, 6)

@@ -967,7 +967,15 @@ PROTO_TCP = 6
 PROTO_UDP = 17
 
 
-@dataclass(slots=True)
+# dataclass(slots=True) needs Python 3.10.  The Jupyter KERNEL can be an older
+# interpreter than config.PYTHON_EXE -- a conda env, say -- and this module has
+# to import there too, so slots are requested only when they are available.
+# They are an optimisation, not a requirement: the record is "slim" because it
+# holds a handful of plain fields, not because of __slots__.
+_DATACLASS_KWARGS = {"slots": True} if sys.version_info >= (3, 10) else {}
+
+
+@dataclass(**_DATACLASS_KWARGS)
 class PacketRecord:
     """A SLIM per-packet record -- fix #6 for cicflowmeter 0.5.0.
 
