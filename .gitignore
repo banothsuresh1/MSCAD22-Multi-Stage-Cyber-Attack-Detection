@@ -1,4 +1,26 @@
+# --- python ---------------------------------------------------------------
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# --- generated reports ----------------------------------------------------
 Notebook/stage_a_report.txt
+
+# Never commit generated output.  A Windows path such as C:\MSCAD2022 is a
+# RELATIVE path on Linux/macOS, so running the code off-Windows can create a
+# folder literally named "C:\MSCAD2022" inside the repo -- and git on Windows
+# then refuses to check it out ("invalid path").  These rules stop that, and
+# config.usable_output_dir() now refuses to write there in the first place.
+Notebook/C:*
+C:*
+*\\*
+Notebook/outputs/
+Notebook/data/
+**/outputs/**/*.csv
+**/outputs/**/*.png
+**/outputs/**/*.txt
+**/outputs/**/*.parquet
+
+# --- capture files (never belong in git) ----------------------------------
+*.pcap
+*.pcapng

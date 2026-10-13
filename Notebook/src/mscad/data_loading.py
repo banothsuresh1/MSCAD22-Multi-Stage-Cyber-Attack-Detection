@@ -442,9 +442,13 @@ def acquire_captures(folder: Path | str | None = None, verbose: bool = True,
 
     report = pd.DataFrame(rows, columns=ACQUISITION_FIELDS)
 
+    report_path = None
     if save_report:
-        config.STEP2_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        report.to_csv(config.STEP2_OUTPUT_DIR / "acquisition_report.csv", index=False)
+        folder = prepare_output_dir(config.STEP2_OUTPUT_DIR,
+                                    "the Step 2 acquisition report", verbose=verbose)
+        if folder is not None:
+            report_path = folder / "acquisition_report.csv"
+            report.to_csv(report_path, index=False)
 
     if verbose:
         show_title("Step 2.1 -- files loaded from %s" % folder)
@@ -459,9 +463,8 @@ def acquire_captures(folder: Path | str | None = None, verbose: bool = True,
         if failures:
             show_note("These files could NOT be read and are excluded from Step 3:")
             show_table(pd.DataFrame(failures))
-        if save_report:
-            show_note("Report saved to %s"
-                      % (config.STEP2_OUTPUT_DIR / "acquisition_report.csv"))
+        if report_path is not None:
+            show_note("Report saved to %s" % report_path)
 
     if not frames:
         raise MissingCapturesError(
@@ -754,9 +757,16 @@ def save_merged(merged: pd.DataFrame, checks: Sequence[dict[str, Any]] | None = 
     report always describes a real file on disk.
     """
     overwrite = config.OVERWRITE_MERGED if overwrite is None else overwrite
-    config.STEP3_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     out: dict[str, Any] = {"target": str(config.MERGED_CSV),
                            "folder": str(config.STEP3_OUTPUT_DIR)}
+
+    folder = prepare_output_dir(config.STEP3_OUTPUT_DIR,
+                                "the merged dataset", verbose=verbose)
+    if folder is None:
+        out.update({"status": "skipped_not_windows", "ok": False,
+                    "verification": {"exists": False, "ok": False,
+                                     "reason": config.why_unusable(config.STEP3_OUTPUT_DIR)}})
+        return out
 
     if config.MERGED_CSV.exists() and not overwrite:
         out["status"] = "kept_existing"
@@ -806,7 +816,7 @@ def save_merged(merged: pd.DataFrame, checks: Sequence[dict[str, Any]] | None = 
             "nan_cells": "", "inf_cells": "", "label_counts": "",
             "timestamp_format": "", "first_timestamp": "", "last_timestamp": "",
         })
-    report_path = config.STEP3_OUTPUT_DIR / "merge_report.csv"
+    report_path = folder / "merge_report.csv"
     pd.DataFrame(report_rows).to_csv(report_path, index=False)
     out["report"] = str(report_path)
 
@@ -930,6 +940,26 @@ def show_table(frame: pd.DataFrame, note: str | None = None,
         show_note(note)
 
 
+def prepare_output_dir(path, what: str = "output", verbose: bool = True) -> Path | None:
+    """Create an output folder, or refuse and say why.
+
+    Returns None when `path` is a Windows path and we are not on Windows.  On
+    Linux/macOS, Path(r"C:\\MSCAD2022") is a RELATIVE folder of that literal
+    name, so mkdir() would create junk in the current working directory -- which
+    is exactly how "C:\\MSCAD2022" once ended up committed inside the repo and
+    broke `git pull` on Windows with "invalid path".
+
+    Every function in this module that writes a file goes through here first.
+    """
+    folder = config.usable_output_dir(path)
+    if folder is None:
+        if verbose:
+            print("  [SKIP]  %s not written -- %s" % (what, config.why_unusable(path)))
+        return None
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
 def kv_table(pairs: Sequence[tuple[str, Any]]) -> pd.DataFrame:
     """A plain two-column metric/value table."""
     return pd.DataFrame({"metric": [k for k, _ in pairs],
@@ -966,8 +996,15 @@ def plot_label_counts(df: pd.DataFrame, path: Path | None = None,
             print('             "%s" -m pip install matplotlib' % sys.executable)
         return None
 
-    path = Path(path) if path is not None else config.STEP3_OUTPUT_DIR / "label_counts.png"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if path is not None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        folder = prepare_output_dir(config.STEP3_OUTPUT_DIR, "the label chart",
+                                    verbose=verbose)
+        if folder is None:
+            return None
+        path = folder / "label_counts.png"
 
     counts = df[config.LABEL_COLUMN].value_counts().sort_values(ascending=False)
     fig, ax = plt.subplots(figsize=(9, 5), dpi=150)
@@ -1146,21 +1183,23 @@ def compare_labels_with_kaggle(df: pd.DataFrame, folder: Path | None = None,
 
     # the comparison is a Step 3 report, so it is saved beside the merged data
     saved: dict[str, str] = {}
-    try:
-        config.STEP3_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        if len(table):
-            path = config.STEP3_OUTPUT_DIR / "kaggle_label_comparison.csv"
-            table.to_csv(path, index=False)
-            saved["comparison"] = str(path)
-        if len(one_sided):
-            path = config.STEP3_OUTPUT_DIR / "kaggle_labels_one_sided.csv"
-            one_sided.to_csv(path, index=False)
-            saved["one_sided"] = str(path)
-        if verbose and saved:
-            show_note("Saved: %s" % ", ".join(saved.values()))
-    except OSError as exc:                       # a read-only drive must not stop Step 3
-        if verbose:
-            show_note("Could not save the comparison table: %r" % (exc,))
+    folder = prepare_output_dir(config.STEP3_OUTPUT_DIR,
+                                "the Kaggle comparison table", verbose=verbose)
+    if folder is not None:
+        try:
+            if len(table):
+                path = folder / "kaggle_label_comparison.csv"
+                table.to_csv(path, index=False)
+                saved["comparison"] = str(path)
+            if len(one_sided):
+                path = folder / "kaggle_labels_one_sided.csv"
+                one_sided.to_csv(path, index=False)
+                saved["one_sided"] = str(path)
+            if verbose and saved:
+                show_note("Saved: %s" % ", ".join(saved.values()))
+        except OSError as exc:                   # a read-only drive must not stop Step 3
+            if verbose:
+                show_note("Could not save the comparison table: %r" % (exc,))
 
     return {"table": table, "one_sided": one_sided, "spelling": spelling,
             "ours": ours, "kaggle": theirs, "info": info, "saved": saved}
@@ -1358,20 +1397,23 @@ def save_step3_reports(merged: pd.DataFrame, summary: dict[str, Any] | None = No
     label_counts.csv, source_capture_x_label.csv, label_counts.png and
     summary.txt -- all under C:\\MSCAD2022\\outputs\\step3, an absolute path.
     """
-    config.STEP3_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     written: dict[str, str] = {}
+    folder = prepare_output_dir(config.STEP3_OUTPUT_DIR, "the Step 3 reports",
+                                verbose=verbose)
+    if folder is None:
+        return written
 
     counts = merged[config.LABEL_COLUMN].value_counts()
     label_tbl = pd.DataFrame({"Label": counts.index.astype(str),
                               "flows": counts.to_numpy(),
                               "share_%": (100.0 * counts / len(merged)).round(4).to_numpy()})
-    path = config.STEP3_OUTPUT_DIR / "label_counts.csv"
+    path = folder / "label_counts.csv"
     label_tbl.to_csv(path, index=False)
     written["label_counts"] = str(path)
 
     crosstab = pd.crosstab(merged["Source_Capture"], merged[config.LABEL_COLUMN],
                            margins=True)
-    path = config.STEP3_OUTPUT_DIR / "source_capture_x_label.csv"
+    path = folder / "source_capture_x_label.csv"
     crosstab.to_csv(path)
     written["crosstab"] = str(path)
 
@@ -1400,7 +1442,7 @@ def save_step3_reports(merged: pd.DataFrame, summary: dict[str, Any] | None = No
     for label, n in counts.items():
         lines.append("  %-18s %10d  (%.3f%%)" % (label, n, 100.0 * n / len(merged)))
     lines += ["", "Nothing was cleaned: inf, NaN and duplicate rows are all kept."]
-    path = config.STEP3_OUTPUT_DIR / "summary.txt"
+    path = folder / "summary.txt"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     written["summary"] = str(path)
 

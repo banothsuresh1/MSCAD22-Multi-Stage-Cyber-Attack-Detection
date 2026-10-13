@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # ===========================================================================
 # 1. FOLDERS
@@ -570,3 +570,44 @@ def find_kaggle_csv(folder: Path | None = None) -> tuple[Path | None, list[Path]
         if chosen is not None:
             return chosen, candidates
     return candidates[0], candidates
+
+
+# ===========================================================================
+# 7. CROSS-PLATFORM SAFETY
+# ===========================================================================
+# A Windows absolute path such as r"C:\MSCAD2022" is NOT absolute on Linux or
+# macOS -- Path() treats it as a RELATIVE folder literally named "C:\MSCAD2022".
+# Running this code off-Windows therefore used to create that folder inside the
+# repository, and git on Windows then refuses to check it out:
+#     error: invalid path 'Notebook/C:\MSCAD2022/outputs/step3/...'
+# These helpers make the code refuse to write there instead.
+
+
+def is_windows_absolute(path) -> bool:
+    r"""True for a path like C:\... or \\server\share, on ANY operating system."""
+    return PureWindowsPath(str(path)).drive != ""
+
+
+def running_on_windows() -> bool:
+    return os.name == "nt"
+
+
+def usable_output_dir(path) -> Path | None:
+    """The folder to write into, or None when it would be unsafe.
+
+    None means: this is a Windows path and we are not on Windows, so creating
+    it would silently make a junk folder in the current working directory.
+    Callers report that and skip writing rather than producing garbage.
+    """
+    if not running_on_windows() and is_windows_absolute(path):
+        return None
+    return Path(path)
+
+
+def why_unusable(path) -> str:
+    """A one-line explanation for a caller to print."""
+    return ("%s is a Windows path (drive %r) but this is %s, where it would be "
+            "created as a RELATIVE folder of that literal name. Nothing was "
+            "written. Run on Windows, or point DATA_ROOT at a local folder "
+            "(MSCAD_DATA_ROOT=/some/dir)."
+            % (path, PureWindowsPath(str(path)).drive, os.name))
