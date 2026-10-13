@@ -814,5 +814,79 @@ STEP5_FILES = {
     "chart": "split_class_counts.png",
 }
 
-# Declared above, before the Step 5 block existed.
+
+# ===========================================================================
+# STEP 6 -- feature selection (MI + Pearson + permutation importance)
+# ===========================================================================
+# Input:  the Step 5 outputs (X_train.csv, X_test.csv, y_train.csv, y_test.csv).
+# Output: STEP6_OUTPUT_DIR, created if missing.
+#
+# EVERY selection decision is made on the TRAINING set alone.  X_test is touched
+# once, at the very end, only to take the same columns.  Choosing features by
+# looking at the test set is the same leak as scaling before the split: the
+# reported score stops meaning anything.
+STEP6_OUTPUT_DIR = OUTPUTS_DIR / "step6"      # C:\MSCAD2022\outputs\step6
+
+# 6.3 -- Pearson redundancy filter.
+# |r| >= PEARSON_THRESHOLD means the two features carry the same information, so
+# one of them is dropped.  0.95 is deliberately strict: it removes near-copies
+# (Subflow Fwd Pkts vs Tot Fwd Pkts, say) without touching features that merely
+# move together.
+PEARSON_THRESHOLD = 0.95
+# Pairs in [PEARSON_REPORT_LOWER, PEARSON_THRESHOLD) are REPORTED and kept.  They
+# matter because permutation importance understates both halves of such a pair:
+# shuffling one lets the model lean on the other.
+PEARSON_REPORT_LOWER = 0.80
+
+# 6.6 -- how many features survive.
+N_SELECTED_FEATURES = 30
+
+# 6.4 -- permutation importance.
+# An inner split of the TRAINING set only: fit the forest on one part, measure
+# the importance drop on the other.  The Step 5 test set is not involved.
+PI_VALIDATION_SIZE = 0.20
+PI_N_REPEATS = 10
+# macro-F1 weights every class equally, so shuffling a feature that only the
+# 23-row classes depend on still shows up.  "accuracy" would hide it entirely.
+PI_SCORING = "f1_macro"
+RF_PARAMS = dict(n_estimators=200, class_weight="balanced",
+                 n_jobs=-1, random_state=RANDOM_STATE)
+
+# 6.2 -- mutual information.
+MI_RANDOM_STATE = RANDOM_STATE
+MI_N_NEIGHBORS = 3
+
+# A negative permutation importance means shuffling the feature made the score
+# BETTER, which is noise around zero, not evidence against the feature.  Clipping
+# to 0 keeps the min-max normalisation from being stretched by that noise.
+CLIP_NEGATIVE_PI = True
+
+# False = if the Step 6 outputs already exist, load them instead of reselecting.
+OVERWRITE_STEP6 = False
+
+# Step 6 output files (all inside STEP6_OUTPUT_DIR).
+STEP6_FILES = {
+    "mi_all": "mi_scores_all.csv",               # every feature, before Pearson
+    "mi_kept": "mi_scores.csv",                  # the Pearson survivors only
+    "corr_matrix": "pearson_corr_matrix.csv",
+    "dropped_pairs": "pearson_dropped_pairs.csv",
+    "remaining_pairs": "pearson_remaining_pairs.csv",
+    "pi_scores": "pi_scores.csv",
+    "per_class_f1": "rf_per_class_f1.csv",
+    "pi_overlap": "pi_duplicate_overlap.csv",
+    "ranking": "combined_ranking.csv",
+    "selected": "selected_features.json",
+    "X_train_selected": "X_train_selected.csv",
+    "X_test_selected": "X_test_selected.csv",
+    "y_train": "y_train.csv",                    # copied from Step 5, unchanged
+    "y_test": "y_test.csv",
+    "rf_baseline": "rf_baseline.joblib",
+    "report": "step6_report.csv",
+    "heatmap": "pearson_heatmap.png",
+    "ranking_chart": "combined_ranking_top30.png",
+    "funnel": "feature_funnel.png",
+}
+
+# Declared above, before the Step 5 and Step 6 blocks existed.
 DIRS_TO_CREATE.append(STEP5_OUTPUT_DIR)
+DIRS_TO_CREATE.append(STEP6_OUTPUT_DIR)
