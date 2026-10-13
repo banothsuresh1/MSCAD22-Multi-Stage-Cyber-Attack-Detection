@@ -1144,8 +1144,26 @@ def compare_labels_with_kaggle(df: pd.DataFrame, folder: Path | None = None,
             show_note("Matched on the normalised form, but spelled differently:")
             show_table(spelling)
 
+    # the comparison is a Step 3 report, so it is saved beside the merged data
+    saved: dict[str, str] = {}
+    try:
+        config.STEP3_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        if len(table):
+            path = config.STEP3_OUTPUT_DIR / "kaggle_label_comparison.csv"
+            table.to_csv(path, index=False)
+            saved["comparison"] = str(path)
+        if len(one_sided):
+            path = config.STEP3_OUTPUT_DIR / "kaggle_labels_one_sided.csv"
+            one_sided.to_csv(path, index=False)
+            saved["one_sided"] = str(path)
+        if verbose and saved:
+            show_note("Saved: %s" % ", ".join(saved.values()))
+    except OSError as exc:                       # a read-only drive must not stop Step 3
+        if verbose:
+            show_note("Could not save the comparison table: %r" % (exc,))
+
     return {"table": table, "one_sided": one_sided, "spelling": spelling,
-            "ours": ours, "kaggle": theirs, "info": info}
+            "ours": ours, "kaggle": theirs, "info": info, "saved": saved}
 
 
 def describe_table(df: pd.DataFrame, columns: Sequence[str] | None = None) -> pd.DataFrame:
@@ -1156,11 +1174,23 @@ def describe_table(df: pd.DataFrame, columns: Sequence[str] | None = None) -> pd
     replace inf with NaN on a COPY, and add an inf_count column so the inf
     values are still visible as a number.  df itself is never modified.
     """
+    import warnings
+
     cols = [c for c in (columns or DESCRIBE_COLUMNS) if c in df.columns]
     block = df[cols]
     inf_counts = {c: int(np.isinf(block[c].to_numpy(dtype="float64")).sum()) for c in cols}
-    finite = block.replace([np.inf, -np.inf], np.nan)
-    out = finite.describe().T
+
+    # Replacing inf with NaN on a COPY is what actually removes the warnings:
+    # mean, std and the quantiles all end up doing inf - inf, which is NaN and
+    # which numpy reports as "invalid value encountered in subtract".
+    # The errstate/catch_warnings block is a LOCAL safety net on top of that,
+    # in case a future pandas computes something else here.  It is scoped to
+    # this call -- no global warning filter is touched.
+    with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        finite = block.replace([np.inf, -np.inf], np.nan)
+        out = finite.describe().T
+
     out.insert(0, "inf_count", [inf_counts[c] for c in out.index])
     return out
 
@@ -1257,9 +1287,14 @@ def summarize_dataset(df: pd.DataFrame, make_plot: bool = True,
 
     # --- 9. NaN and inf ---------------------------------------------------
     show_title("9. NaN and inf per column")
-    nan_by_col = df[feats].isna().sum()
-    inf_by_col = pd.Series({c: int(np.isinf(df[c].to_numpy(dtype="float64")).sum())
-                            for c in feats})
+    import warnings
+    # isna/isinf are elementwise tests, not arithmetic, so they do not warn --
+    # but the same local safety net is applied for consistency.
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        nan_by_col = df[feats].isna().sum()
+        inf_by_col = pd.Series({c: int(np.isinf(df[c].to_numpy(dtype="float64")).sum())
+                                for c in feats})
     out["nan_total"], out["inf_total"] = int(nan_by_col.sum()), int(inf_by_col.sum())
     nz = pd.DataFrame({"column": feats,
                        "NaN": nan_by_col.reindex(feats).to_numpy(),

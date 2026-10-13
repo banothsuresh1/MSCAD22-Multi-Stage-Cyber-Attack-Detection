@@ -968,3 +968,94 @@ def test_keeping_an_identical_file_reports_a_clean_match(tmp_path, monkeypatch, 
     assert result["status"] == "kept_existing"
     assert result["ok"] is True and result["stale"] is False
     assert "matches what was just built" in printed
+
+
+# ===========================================================================
+# 16. no RuntimeWarnings anywhere in the Step 3 inspection
+# ===========================================================================
+def test_whole_overview_emits_no_runtime_warning_on_inf(tmp_path, monkeypatch, capsys):
+    """Not just describe(): the entire summarize_dataset run must be quiet.
+
+    The warnings came from pandas computing mean/std/quantiles over columns
+    holding inf. This runs every section with RuntimeWarning promoted to an
+    error, so a new one anywhere would fail the test.
+    """
+    import warnings
+
+    redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    six_captures(folder)
+    frames, _r, _f = dl.acquire_captures(folder, verbose=False)
+    merged, _ = dl.merge_flow_csvs(frames=frames, verbose=False)
+    # inf in all three rate columns, as the real zero-duration flows produce
+    for col in ("Flow Byts/s", "Flow Pkts/s", "Fwd Pkts/s"):
+        merged.loc[merged.index[:4], col] = np.inf
+    merged.loc[merged.index[2], "Pkt Len Mean"] = np.nan
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        out = dl.summarize_dataset(merged, make_plot=True, compare_kaggle=False)
+    capsys.readouterr()
+
+    assert out["describe"].loc["Flow Byts/s", "inf_count"] == 4
+    assert out["inf_total"] == 12
+
+
+def test_describe_table_has_the_local_warning_guard():
+    """The safety net must be local -- never a global warning filter."""
+    import inspect
+    src = inspect.getsource(dl.describe_table)
+    assert "np.errstate(invalid=\"ignore\"" in src
+    assert "warnings.catch_warnings()" in src
+    assert "warnings.simplefilter" not in src, "must not change warnings globally"
+
+
+def test_inf_survives_the_overview_and_the_saved_csv(tmp_path, monkeypatch):
+    """Statistics are computed on a copy; the data and the CSV keep their inf."""
+    step3 = redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    six_captures(folder)
+    frames, _r, _f = dl.acquire_captures(folder, verbose=False)
+    merged, _ = dl.merge_flow_csvs(frames=frames, verbose=False)
+    merged.loc[merged.index[:3], "Flow Byts/s"] = np.inf
+    merged.loc[merged.index[0], "Flow Pkts/s"] = -np.inf
+
+    dl.save_merged(merged, overwrite=True, verbose=False)
+    dl.summarize_dataset(merged, make_plot=False, compare_kaggle=False)
+
+    # in memory
+    assert int(np.isinf(merged["Flow Byts/s"].to_numpy()).sum()) == 3
+    assert np.isneginf(merged["Flow Pkts/s"].iloc[0])
+    # and on disk
+    on_disk = pd.read_csv(step3 / "MSCAD_merged.csv", low_memory=False)
+    assert int(np.isinf(on_disk["Flow Byts/s"].to_numpy()).sum()) == 3
+    assert np.isneginf(on_disk["Flow Pkts/s"].iloc[0])
+
+
+def test_kaggle_comparison_table_is_saved_to_step3(tmp_path, monkeypatch):
+    step3 = redirect_outputs(monkeypatch, tmp_path / "out")
+    kaggle = tmp_path / "kaggle"
+    write_kaggle(kaggle, "MSCAD.csv", {"Normal": 20, "Port Scan": 5, "Infiltration": 2})
+    df = pd.DataFrame({config.LABEL_COLUMN: ["Normal"] * 23 + ["Port_Scan"] * 4})
+
+    result = dl.compare_labels_with_kaggle(df, folder=kaggle, verbose=False)
+
+    comparison = step3 / "kaggle_label_comparison.csv"
+    one_sided = step3 / "kaggle_labels_one_sided.csv"
+    assert comparison.exists() and one_sided.exists()
+    assert result["saved"]["comparison"] == str(comparison)
+
+    saved = pd.read_csv(comparison).set_index("Label")
+    assert saved.loc["Normal", "ours"] == 23 and saved.loc["Normal", "kaggle"] == 20
+    assert saved.loc["Normal", "difference"] == 3
+    assert saved.loc["TOTAL (matched)", "ours"] == 27
+    assert pd.read_csv(one_sided).set_index("Label").loc["Infiltration", "side"] == "Kaggle only"
+
+
+def test_chart_is_written_to_step3(tmp_path, monkeypatch):
+    step3 = redirect_outputs(monkeypatch, tmp_path / "out")
+    df = pd.DataFrame({config.LABEL_COLUMN: ["Normal"] * 10 + ["Port_Scan"] * 3})
+    path = dl.plot_label_counts(df, verbose=False)
+    if path is not None:                       # skipped when matplotlib is absent
+        assert Path(path).parent == step3
+        assert Path(path).name == "label_counts.png"
