@@ -749,12 +749,74 @@ def run_step4(df: pd.DataFrame | None = None, overwrite: bool | None = None,
 # ===========================================================================
 # 4.4  THE COMBINED FILE -- preprocessing.csv
 # ===========================================================================
-# One CSV holding the final preprocessed dataset: the feature columns followed
-# by the three label columns.  It is built by COLUMN-JOINING the frames Step 4
-# already produced -- nothing is recomputed and nothing is re-scaled -- so it
-# can never drift from features_scaled.csv / labels.csv.  The other eight Step 4
-# outputs are untouched.
+# One CSV holding the final preprocessed dataset, laid out for READING and for
+# the sequence / attack-chain work:
+#
+#   Src IP | Dst IP | Src Port | Dst Port | Protocol | Timestamp
+#          | <scaled features, without the four Protocol_* columns> | Label
+#
+# It is built by COLUMN-JOINING the frames Step 4 already produced -- nothing is
+# recomputed and nothing is re-scaled -- so it can never drift from
+# features_scaled.csv / labels.csv.  The other eight Step 4 outputs are
+# untouched: they keep the numeric Protocol_* one-hot columns and all three
+# label columns, because that is what a model is trained on.
 LABEL_OUTPUT_COLUMNS = ["Label", "Label_encoded", "Label_binary"]
+
+
+def protocol_text_from_one_hot(features: pd.DataFrame, verbose: bool = True):
+    """Protocol_ICMP / _TCP / _UDP / _other  ->  one "ICMP"/"TCP"/"UDP"/"OTHER".
+
+    Exactly one of the four must be 1 in every row.  A row with none set, or
+    with two set, is a real defect (the one-hot encoding is broken), so it is
+    reported as [FAIL] with the row count rather than silently filled in.
+
+    Returns (series, table, ok, bad).  `bad` holds the offending row positions.
+    """
+    mapping = dict(config.PROTOCOL_TEXT_FROM_ONE_HOT)
+    absent = [c for c in mapping if c not in features.columns]
+    if absent:
+        raise PreprocessingError(
+            "cannot build the readable `%s` column: the feature frame has no %s. "
+            "Re-run Step 4 with OVERWRITE_STEP4 = True so the Protocol one-hot "
+            "columns are rebuilt." % (config.COMBINED_PROTOCOL_COLUMN, absent))
+
+    columns = list(mapping)
+    block = features[columns].to_numpy(dtype="int64")
+    hits = block.sum(axis=1)
+    bad = np.flatnonzero(hits != 1)
+
+    # idxmax picks the single column that is 1.  For a bad row it would pick the
+    # first column, so those rows are blanked instead of being given a wrong
+    # protocol -- and the check below fails loudly.
+    picked = np.asarray(columns, dtype=object)[block.argmax(axis=1)]
+    series = pd.Series(picked, index=features.index,
+                       name=config.COMBINED_PROTOCOL_COLUMN).map(mapping)
+    if bad.size:
+        series.iloc[bad] = pd.NA
+
+    rows = []
+    for column, text in mapping.items():
+        rows.append({"one-hot column": column, "Protocol": text,
+                     "one-hot sum": int(features[column].sum()),
+                     "text rows": int((series == text).sum())})
+    table = pd.DataFrame(rows)
+    ok = bool(bad.size == 0)
+
+    if verbose:
+        show_table(table, note="The four one-hot columns collapse into one readable "
+                               "`%s` column for preprocessing.csv. `one-hot sum` and "
+                               "`text rows` must match exactly."
+                               % config.COMBINED_PROTOCOL_COLUMN)
+        if ok:
+            show_note("[OK] every row has exactly one of the four one-hot columns set.")
+        else:
+            none_set = int((hits == 0).sum())
+            many_set = int((hits > 1).sum())
+            show_note("**[FAIL]** %d rows do not have exactly one Protocol one-hot "
+                      "column set: %d row(s) with none set and %d row(s) with two or "
+                      "more. First offending row positions: %s"
+                      % (bad.size, none_set, many_set, list(bad[:10])))
+    return series, table, ok, bad
 
 
 def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
@@ -762,36 +824,47 @@ def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
                    id_columns: Sequence[str] | None = None,
                    feature_order: Sequence[str] | None = None,
                    verbose: bool = True) -> pd.DataFrame:
-    """Join features and labels side by side, in the original row order.
+    """Join identifiers, features and the Label side by side, in row order.
 
     The row counts must match exactly.  They are checked BEFORE the join,
     because pd.concat would otherwise pad the shorter frame with NaN and the
     mismatch would only surface much later as mysterious missing values.
 
-    Column order: [metadata] + features (feature_order) + Label, Label_encoded,
-    Label_binary.
+    Column order:
+        Src IP, Dst IP, Src Port, Dst Port, Protocol, Timestamp,
+        <features minus the four Protocol_* one-hot columns>, Label
+
+    Protocol is DERIVED from the Protocol_* one-hot feature columns, not copied
+    from metadata, so this works with a metadata.csv written before Protocol was
+    added to METADATA_COLUMNS.
     """
     id_columns = (list(config.COMBINED_ID_COLUMNS) if id_columns is None
                   else list(id_columns))
+    proto_name = config.COMBINED_PROTOCOL_COLUMN
+    wants_protocol = proto_name in id_columns
+    from_metadata = [c for c in id_columns if c != proto_name]
 
     parts = {"features": len(features), "labels": len(labels)}
-    if id_columns:
+    if from_metadata:
         if metadata is None:
             raise PreprocessingError(
                 "COMBINED_ID_COLUMNS asks for %s but no metadata frame was given"
-                % id_columns)
-        absent = [c for c in id_columns if c not in metadata.columns]
+                % from_metadata)
+        absent = [c for c in from_metadata if c not in metadata.columns]
         if absent:
             raise PreprocessingError(
                 "the metadata frame has no %s, so those identifier columns cannot be "
-                "added to preprocessing.csv" % absent)
+                "added to preprocessing.csv. Either re-run Step 4 with "
+                "OVERWRITE_STEP4 = True, or let build_combined_from_saved() fill them "
+                "in from %s." % (absent, config.MERGED_CSV))
         parts["metadata"] = len(metadata)
     if len(set(parts.values())) != 1:
         raise PreprocessingError(
             "[FAIL] the parts have different row counts and must not be joined: %s. "
             "Joining them would pad the shorter one with NaN." % parts)
 
-    missing_labels = [c for c in LABEL_OUTPUT_COLUMNS if c not in labels.columns]
+    label_columns = list(config.COMBINED_LABEL_COLUMNS)
+    missing_labels = [c for c in label_columns if c not in labels.columns]
     if missing_labels:
         raise PreprocessingError("labels is missing %s" % missing_labels)
 
@@ -800,19 +873,43 @@ def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
     if unknown:
         raise PreprocessingError(
             "feature_list names columns that are not in the features frame: %s" % unknown)
+    # The four one-hot columns come out only because the single readable Protocol
+    # replaces them.  Without that column they stay, so protocol information can
+    # never vanish from the file unnoticed.
+    drop = set(config.COMBINED_DROP_FEATURE_COLUMNS) if wants_protocol else set()
+    dropped_one_hot = [c for c in order if c in drop]
+    order = [c for c in order if c not in drop]
+
+    protocol = None
+    protocol_ok = True
+    if wants_protocol:
+        protocol, _, protocol_ok, bad = protocol_text_from_one_hot(features,
+                                                                   verbose=verbose)
+        if not protocol_ok:
+            raise PreprocessingError(
+                "[FAIL] %d of %d rows do not have exactly one Protocol one-hot column "
+                "set, so the readable `%s` column cannot be built. First offending row "
+                "positions: %s" % (bad.size, len(features), proto_name, list(bad[:10])))
 
     # reset_index so the join is POSITIONAL: row i of each part is the same flow,
     # and a stray index would otherwise realign the rows silently.
-    pieces = []
-    if id_columns:
-        ids = metadata[id_columns].reset_index(drop=True).copy()
-        # ports and Protocol stay integers, never floats or scaled values
+    ids = pd.DataFrame(index=range(len(features)))
+    if from_metadata:
+        ids = metadata[from_metadata].reset_index(drop=True).copy()
+        # ports stay integers, never floats or scaled values
         for col in config.COMBINED_INT_COLUMNS:
             if col in ids.columns:
                 ids[col] = ids[col].astype("int64")
+    if protocol is not None:
+        ids[proto_name] = protocol.reset_index(drop=True).astype("string")
+    if id_columns:
+        ids = ids[id_columns]
+
+    pieces = []
+    if id_columns:
         pieces.append(ids)
     pieces.append(features[order].reset_index(drop=True))
-    pieces.append(labels[LABEL_OUTPUT_COLUMNS].reset_index(drop=True))
+    pieces.append(labels[label_columns].reset_index(drop=True))
 
     combined = pd.concat(pieces, axis=1)
 
@@ -821,11 +918,14 @@ def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
             ("rows", f"{len(combined):,}"),
             ("identifier columns", len(id_columns)),
             ("feature columns", len(order)),
-            ("label columns", len(LABEL_OUTPUT_COLUMNS)),
+            ("Protocol_* one-hot columns left out", len(dropped_one_hot)),
+            ("label columns", ", ".join(label_columns)),
             ("total columns", combined.shape[1]),
         ]), note="Built by column-joining the frames Step 4 already produced -- nothing "
                  "recomputed, nothing re-scaled. The identifiers keep their ORIGINAL "
-                 "values and are joined by row POSITION, never by merging on values.")
+                 "values and are joined by row POSITION, never by merging on values. "
+                 "`Protocol` is derived from the one-hot columns, which are themselves "
+                 "left out here but KEPT in features_scaled.csv.")
     return combined
 
 
@@ -837,6 +937,9 @@ def verify_combined(combined: pd.DataFrame, features: pd.DataFrame,
     """Re-read the combined file and check it against its parts.  [OK]/[FAIL]."""
     id_columns = (list(config.COMBINED_ID_COLUMNS) if id_columns is None
                   else list(id_columns))
+    proto_name = config.COMBINED_PROTOCOL_COLUMN
+    from_metadata = [c for c in id_columns if c != proto_name]
+    label_columns = list(config.COMBINED_LABEL_COLUMNS)
     path = Path(path) if path is not None else config.COMBINED_CSV
     checks: list[dict[str, Any]] = []
 
@@ -861,50 +964,92 @@ def verify_combined(combined: pd.DataFrame, features: pd.DataFrame,
     add("rows match the other Step 4 files", len(on_disk) == rows_expected,
         "%s on disk vs %s expected" % (f"{len(on_disk):,}", f"{rows_expected:,}"))
 
+    # the feature block: everything Step 4 produced except the four one-hot
+    # columns, which the single readable Protocol replaces
+    drop = (set(config.COMBINED_DROP_FEATURE_COLUMNS)
+            if proto_name in id_columns else set())
+    source_features = [c for c in features.columns if c not in drop]
     n_ids = len(id_columns)
-    cols_expected = n_ids + len(features.columns) + len(LABEL_OUTPUT_COLUMNS)
-    add("columns == %d identifiers + %d features + 3 labels"
-        % (n_ids, len(features.columns)),
+    expected_order = id_columns + source_features + label_columns
+    cols_expected = len(expected_order)
+    add("columns == %d identifiers + %d features + %d label"
+        % (n_ids, len(source_features), len(label_columns)),
         on_disk.shape[1] == cols_expected,
         "%d on disk vs %d expected" % (on_disk.shape[1], cols_expected))
+    add("columns are in the expected order",
+        list(on_disk.columns) == expected_order,
+        "identifiers, then features, then %s" % ", ".join(label_columns)
+        if list(on_disk.columns) == expected_order
+        else "got %s ... %s" % (list(on_disk.columns[:7]), list(on_disk.columns[-3:])))
+
+    present_one_hot = [c for c in config.COMBINED_DROP_FEATURE_COLUMNS
+                       if c in drop and c in on_disk.columns]
+    add("no Protocol_* one-hot columns", not present_one_hot,
+        "they stay in features_scaled.csv only" if not present_one_hot
+        else "found %s" % present_one_hot)
+    extra_labels = [c for c in LABEL_OUTPUT_COLUMNS
+                    if c not in label_columns and c in on_disk.columns]
+    add("no Label_encoded / Label_binary columns", not extra_labels,
+        "they stay in labels.csv only" if not extra_labels
+        else "found %s" % extra_labels)
 
     if id_columns:
         add("the first %d columns are the identifiers, in order" % n_ids,
             list(on_disk.columns[:n_ids]) == id_columns,
             "got %s" % list(on_disk.columns[:n_ids]))
         if metadata is not None and len(on_disk) == len(metadata):
+            compared = [c for c in from_metadata if c in metadata.columns]
             same_ids = all(
                 on_disk[c].astype(str).tolist() == metadata[c].astype(str).tolist()
-                for c in id_columns if c in metadata.columns)
-            add("identifier values match metadata.csv row by row", same_ids,
-                "%d columns over %s rows" % (n_ids, f"{len(on_disk):,}"))
+                for c in compared)
+            add("identifier values match metadata row by row", same_ids,
+                "%d columns over %s rows" % (len(compared), f"{len(on_disk):,}"))
         else:
-            add("identifier values match metadata.csv row by row", False,
+            add("identifier values match metadata row by row", False,
                 "no metadata frame, or the row counts differ")
         int_ok = all(pd.api.types.is_integer_dtype(on_disk[c])
                      for c in config.COMBINED_INT_COLUMNS if c in on_disk.columns)
-        add("ports and Protocol are integers", int_ok,
+        add("ports are integers", int_ok,
             ", ".join("%s=%s" % (c, on_disk[c].dtype)
                       for c in config.COMBINED_INT_COLUMNS if c in on_disk.columns))
         id_nan = int(on_disk[[c for c in id_columns if c in on_disk.columns]]
                      .isna().to_numpy().sum())
         add("no NaN in the identifier columns", id_nan == 0, "%d NaN cells" % id_nan)
         add("identifiers are NOT in feature_list.json",
-            not set(id_columns) & set(features.columns),
+            not set(id_columns) & set(source_features),
             "they are excluded from the model features")
 
-    feature_cols = [c for c in features.columns if c in on_disk.columns]
+    if proto_name in on_disk.columns and proto_name in id_columns:
+        seen = sorted(set(on_disk[proto_name].dropna().astype(str)))
+        allowed = set(config.PROTOCOL_TEXT_VALUES)
+        add("Protocol holds only %s" % "/".join(config.PROTOCOL_TEXT_VALUES),
+            set(seen) <= allowed,
+            "found %s" % seen if set(seen) <= allowed
+            else "unexpected values: %s" % sorted(set(seen) - allowed))
+        rows = []
+        mismatch = []
+        for column, text in config.PROTOCOL_TEXT_FROM_ONE_HOT.items():
+            n_text = int((on_disk[proto_name].astype(str) == text).sum())
+            n_hot = (int(features[column].sum()) if column in features.columns
+                     else None)
+            rows.append("%s %s" % (text, f"{n_text:,}"))
+            if n_hot is not None and n_hot != n_text:
+                mismatch.append("%s: %d text vs %d one-hot" % (text, n_text, n_hot))
+        add("Protocol counts match the one-hot sums", not mismatch,
+            ", ".join(rows) if not mismatch else "; ".join(mismatch))
+
+    feature_cols = [c for c in source_features if c in on_disk.columns]
     block = on_disk[feature_cols].to_numpy(dtype="float64")
     n_nan, n_inf = int(np.isnan(block).sum()), int(np.isinf(block).sum())
     add("no NaN in the feature columns", n_nan == 0, "%d NaN cells" % n_nan)
     add("no inf in the feature columns", n_inf == 0, "%d inf cells" % n_inf)
 
-    have_labels = all(c in on_disk.columns for c in LABEL_OUTPUT_COLUMNS)
-    add("label columns present", have_labels, ", ".join(LABEL_OUTPUT_COLUMNS))
+    have_labels = all(c in on_disk.columns for c in label_columns)
+    add("label column present", have_labels, ", ".join(label_columns))
     if have_labels and len(on_disk) == len(labels):
         same = all(
             on_disk[c].astype(str).tolist() == labels[c].astype(str).tolist()
-            for c in LABEL_OUTPUT_COLUMNS)
+            for c in label_columns)
         add("labels match labels.csv row by row", same,
             "all %s rows" % f"{len(on_disk):,}" if same else "a row differs")
     else:
@@ -977,11 +1122,78 @@ def save_combined(features: pd.DataFrame, labels: pd.DataFrame,
     return out
 
 
+def _ids_from_merged(metadata: pd.DataFrame, wanted: Sequence[str],
+                     verbose: bool = True) -> pd.DataFrame:
+    """Fill identifier columns a saved metadata.csv is missing from Step 3.
+
+    MSCAD_merged.csv has every identifier, and metadata.csv was written from it
+    in the SAME row order with no row dropped, so the two line up row by row.
+    When metadata still carries Source_Capture and Orig_Row those two are used
+    as an exact key and the alignment is checked rather than assumed; otherwise
+    the join is by row position after a row-count check.
+    """
+    wanted = list(wanted)
+    merged_path = config.MERGED_CSV
+    if not merged_path.exists():
+        raise PreprocessingError(
+            "the saved metadata.csv has no %s and the Step 3 merged file is not on "
+            "disk either (%s), so the identifier columns cannot be recovered.\n"
+            "Set OVERWRITE_STEP4 = True in config.py and re-run Step 4."
+            % (wanted, merged_path))
+
+    key = ["Source_Capture", "Orig_Row"]
+    have_key = all(c in metadata.columns for c in key)
+    usecols = sorted(set(wanted) | (set(key) if have_key else set()))
+    merged = pd.read_csv(merged_path, usecols=lambda c: c in set(usecols),
+                         low_memory=False)
+
+    still_absent = [c for c in wanted if c not in merged.columns]
+    if still_absent:
+        raise PreprocessingError(
+            "%s is missing %s as well, so the identifier columns cannot be "
+            "recovered.\nSet OVERWRITE_STEP4 = True in config.py and re-run Step 4."
+            % (merged_path, still_absent))
+
+    if have_key and all(c in merged.columns for c in key):
+        merged = merged.set_index(key)
+        wanted_index = pd.MultiIndex.from_frame(metadata[key])
+        unknown = (~wanted_index.isin(merged.index)).sum()
+        if unknown:
+            raise PreprocessingError(
+                "%d metadata rows have a (Source_Capture, Orig_Row) key that is not in "
+                "%s, so the identifiers cannot be matched.\nSet OVERWRITE_STEP4 = True "
+                "in config.py and re-run Step 4." % (int(unknown), merged_path))
+        out = merged.loc[wanted_index, wanted].reset_index(drop=True)
+        how = "matched on (Source_Capture, Orig_Row)"
+    else:
+        if len(merged) != len(metadata):
+            raise PreprocessingError(
+                "%s has %s rows but the saved metadata.csv has %s, and metadata has no "
+                "(Source_Capture, Orig_Row) key to match on, so the identifiers cannot "
+                "be recovered safely.\nSet OVERWRITE_STEP4 = True in config.py and "
+                "re-run Step 4."
+                % (merged_path, f"{len(merged):,}", f"{len(metadata):,}"))
+        out = merged[wanted].reset_index(drop=True)
+        how = "joined by row position (metadata has no Source_Capture/Orig_Row key)"
+
+    if verbose:
+        show_note("`%s` is missing from the saved **metadata.csv** -- read from "
+                  "**%s** instead, %s."
+                  % ("`, `".join(wanted), merged_path.name, how))
+    return out
+
+
 def build_combined_from_saved(verbose: bool = True) -> dict[str, Any]:
     """Build preprocessing.csv from the SAVED Step 4 files.
 
     Used when Step 4 itself was skipped (OVERWRITE_STEP4 is False and the
     outputs already exist), so the combined file still matches them exactly.
+
+    An OLD metadata.csv -- one written before Protocol joined METADATA_COLUMNS --
+    is fine: Protocol in preprocessing.csv is derived from the Protocol_* one-hot
+    FEATURE columns, not read from metadata.  Any other identifier column that is
+    genuinely missing is recovered from the Step 3 merged file, and where each
+    column came from is printed.
     """
     folder = config.usable_output_dir(config.STEP4_OUTPUT_DIR)
     if folder is None:
@@ -994,9 +1206,38 @@ def build_combined_from_saved(verbose: bool = True) -> dict[str, Any]:
     features_name = names["features_scaled"] if use_scaled else names["features_clean"]
     features = pd.read_csv(folder / features_name, low_memory=False)
     labels = pd.read_csv(folder / names["labels"], low_memory=False)
+
+    proto_name = config.COMBINED_PROTOCOL_COLUMN
+    from_metadata = [c for c in config.COMBINED_ID_COLUMNS if c != proto_name]
     metadata = None
-    if config.COMBINED_ID_COLUMNS:
+    sources: list[dict[str, str]] = []
+    if proto_name in config.COMBINED_ID_COLUMNS:
+        sources.append({"column": proto_name,
+                        "read from": "%s (derived from the Protocol_* one-hot "
+                                     "columns)" % features_name})
+    if from_metadata:
         metadata = pd.read_csv(folder / names["metadata"], low_memory=False)
+        absent = [c for c in from_metadata if c not in metadata.columns]
+        for column in from_metadata:
+            sources.append({"column": column,
+                            "read from": (names["metadata"] if column not in absent
+                                          else config.MERGED_CSV.name)})
+        if absent:
+            recovered = _ids_from_merged(metadata, absent, verbose=verbose)
+            if len(recovered) != len(metadata):
+                raise PreprocessingError(
+                    "recovered %s identifier rows but metadata has %s"
+                    % (f"{len(recovered):,}", f"{len(metadata):,}"))
+            metadata = metadata.reset_index(drop=True)
+            for column in absent:
+                metadata[column] = recovered[column].to_numpy()
+
+    if verbose and sources:
+        show_table(pd.DataFrame(sources),
+                   note="Where each identifier column came from. Nothing is matched on "
+                        "values: metadata.csv is row-aligned with the Step 4 outputs, "
+                        "and a recovered column is keyed on (Source_Capture, Orig_Row) "
+                        "or row position.")
 
     order = None
     feature_list_path = folder / names["feature_list"]
@@ -1018,13 +1259,19 @@ def get_feature_matrix(df: pd.DataFrame,
     model: the attacker IPs decided the labels in Step 1, so training on them is
     label leakage and would score near-perfectly while learning nothing.
 
-    Use this to get what a model should actually see:
+    Pass the SCALED feature frame, which still has the numeric Protocol_* one-hot
+    columns a model needs:
 
-        import pandas as pd
+        import pandas as pd, config
         from src.mscad import preprocessing
-        df = pd.read_csv(config.COMBINED_CSV)
-        X = preprocessing.get_feature_matrix(df)
-        y = df["Label_encoded"]
+        features = pd.read_csv(config.STEP4_OUTPUT_DIR / "features_scaled.csv")
+        labels = pd.read_csv(config.STEP4_OUTPUT_DIR / "labels.csv")
+        X = preprocessing.get_feature_matrix(features)
+        y = labels["Label_encoded"]
+
+    preprocessing.csv is the readable view, not the training matrix: it replaces
+    the four Protocol_* columns with one text column and keeps only `Label`, so
+    it is NOT a valid input here.
     """
     if feature_list is None:
         folder = config.usable_output_dir(config.STEP4_OUTPUT_DIR)
@@ -1039,6 +1286,12 @@ def get_feature_matrix(df: pd.DataFrame,
 
     missing = [c for c in feature_list if c not in df.columns]
     if missing:
+        hint = ""
+        if set(missing) <= set(config.COMBINED_DROP_FEATURE_COLUMNS):
+            hint = ("\nThis looks like a frame read from preprocessing.csv, which "
+                    "carries one readable `%s` text column instead of the four "
+                    "Protocol_* one-hot columns. Train on features_scaled.csv "
+                    "instead." % config.COMBINED_PROTOCOL_COLUMN)
         raise PreprocessingError(
-            "these feature_list columns are not in the frame: %s" % missing)
+            "these feature_list columns are not in the frame: %s%s" % (missing, hint))
     return df[list(feature_list)]
