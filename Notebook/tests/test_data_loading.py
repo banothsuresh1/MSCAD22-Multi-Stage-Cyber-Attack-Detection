@@ -9,6 +9,7 @@ or written.
     "C:\\Users\\banot\\AppData\\Local\\Programs\\Python\\Python313\\python.exe" -m pytest tests -v
 """
 
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ import pandas as pd
 import pytest
 
 import config
+from conftest import looks_like_windows_path
 from src.mscad import data_loading as dl
 
 
@@ -935,7 +937,7 @@ def test_step3_reports_land_in_step3_output_dir(tmp_path, monkeypatch):
     for key in ("label_counts", "crosstab", "summary"):
         assert Path(written[key]).exists(), key
         assert Path(written[key]).parent == step3
-    assert "Nothing was cleaned" in Path(written["summary"]).read_text()
+    assert "Nothing was cleaned" in Path(written["summary"]).read_text(encoding="utf-8")
     counts = pd.read_csv(written["label_counts"])
     assert int(counts["flows"].sum()) == len(merged)
 
@@ -1150,14 +1152,44 @@ def test_every_writing_helper_is_guarded(tmp_path, monkeypatch, capsys,
     assert_no_leaked_output("plot_label_counts / save_step3_reports")
 
 
+def test_a_windows_path_name_is_recognised_on_any_os():
+    """The detection logic itself -- runs on Windows too, no filesystem needed.
+
+    The companion test below creates the folder for real, which Windows cannot
+    do, so this is where Windows gets its coverage of the rule.
+    """
+    # what an unguarded mkdir() leaves behind on Linux
+    assert looks_like_windows_path(r"C:\MSCAD2022") is True
+    assert looks_like_windows_path(r"D:\data") is True
+    assert looks_like_windows_path(r"MSCAD2022\outputs") is True   # no drive letter
+    assert looks_like_windows_path("C:") is True
+
+    # ordinary names the tests legitimately create must never trip it
+    for name in ("step3", "outputs", "MSCAD_merged.csv", "N-0_flows.csv",
+                 "features_scaled.csv", "a b", "C_drive_notes.txt",
+                 "step4", "W-B-02_flows.csv"):
+        assert looks_like_windows_path(name) is False, name
+
+    # a single letter followed by ":" IS a drive prefix, so "x:y" counts as a
+    # leak. No test here creates such a name, and Windows forbids it outright,
+    # so erring towards "that is a leak" is the safe side.
+    assert looks_like_windows_path("x:y") is True
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows cannot create names containing ':'")
 def test_the_leak_fixture_catches_a_windows_named_folder(tmp_path,
-                                                        assert_no_leaked_output):
+                                                         assert_no_leaked_output):
     """The replacement assertion must have teeth, not just pass.
 
     `assert not (tmp_path / "C:").exists()` had none on Windows: joining a bare
     drive letter resets the anchor, so on a C: temp drive that expression IS
     tmp_path and the assertion failed on every run.  Checking the NAMES in the
     directory behaves identically on both operating systems.
+
+    Creating the offending folder is only possible on Linux -- ":" is illegal in
+    a Windows filename -- so this test is skipped there and
+    test_a_windows_path_name_is_recognised_on_any_os covers the rule instead.
     """
     assert_no_leaked_output("nothing yet")          # clean to begin with
 
@@ -1171,6 +1203,7 @@ def test_the_leak_fixture_catches_a_windows_named_folder(tmp_path,
 
 def test_the_leak_fixture_catches_any_stray_output(tmp_path,
                                                    assert_no_leaked_output):
+    """A legal folder name, so this one runs on Windows as well."""
     (tmp_path / "step3").mkdir()
     with pytest.raises(AssertionError) as err:
         assert_no_leaked_output("a deliberately broken guard")

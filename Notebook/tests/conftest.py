@@ -10,19 +10,39 @@ import re
 
 import pytest
 
-# "C:", "D:" and friends -- a Windows drive prefix at the start of a NAME.
+# A Windows drive prefix at the start of a NAME: "C:", "D:", ...
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
+
+
+def looks_like_windows_path(name: str) -> bool:
+    """True when a directory entry's NAME is really a Windows path.
+
+    This is what an unguarded write leaves behind on Linux.  There,
+    Path(r"C:\\MSCAD2022") is a RELATIVE path whose single part is the literal
+    text "C:\\MSCAD2022", so
+
+        (Path(r"C:\\MSCAD2022") / "outputs" / "step3").mkdir(parents=True)
+
+    creates a directory literally named  C:\\MSCAD2022  in the current folder,
+    with outputs/step3 inside it.  That is exactly how such a folder once ended
+    up committed and broke `git pull` on Windows with "invalid path".
+
+    Both marks are checked: a leading drive letter, and a backslash anywhere in
+    the name (which catches a drive-less Windows path such as
+    "MSCAD2022\\outputs").  Neither can occur in a legitimate name on Linux, and
+    Windows forbids both in a filename, so this never fires on a real file.
+
+    It works on NAMES rather than on paths on purpose -- see
+    assert_no_leaked_output for why a path-based check cannot work on Windows.
+    """
+    return bool(_DRIVE_PREFIX.match(name)) or "\\" in name
 
 
 @pytest.fixture
 def assert_no_leaked_output(tmp_path):
     """Assert that a guarded write created nothing in the current directory.
 
-    The failure this guards against: on Linux, Path(r"C:\\MSCAD2022") is a
-    RELATIVE path, so an unguarded mkdir() creates a folder literally named
-    "C:\\MSCAD2022" wherever the process happens to be.  That is how such a
-    folder once ended up committed and broke `git pull` on Windows with
-    "invalid path".  Every test that exercises the guard chdirs into tmp_path
+    Every test that exercises the Windows-path guard chdirs into tmp_path
     first, so a mistake lands there and nowhere else.
 
     Why this is a fixture and not `assert not (tmp_path / "C:").exists()`:
@@ -32,7 +52,8 @@ def assert_no_leaked_output(tmp_path):
     any other drive it becomes the drive-relative path "C:", which is the
     current directory on C: and has nothing to do with the test.  Listing the
     directory and looking at the NAMES works the same way on both operating
-    systems.
+    systems, so this fixture runs everywhere -- nothing in it is skipped on
+    Windows.
 
     One limitation worth naming: on Windows the guarded path really is
     absolute, so a regression there would create C:\\MSCAD2022\\... rather than
@@ -43,10 +64,10 @@ def assert_no_leaked_output(tmp_path):
     """
     def check(what: str = "a guarded write") -> None:
         entries = sorted(os.listdir(tmp_path))
-        drive_like = [name for name in entries if _DRIVE_PREFIX.match(name)]
-        assert not drive_like, (
+        leaked = [name for name in entries if looks_like_windows_path(name)]
+        assert not leaked, (
             "%s created a folder named after a Windows path: %s in %s"
-            % (what, drive_like, tmp_path))
+            % (what, leaked, tmp_path))
         assert entries == [], (
             "%s created %s in %s; it should have created nothing"
             % (what, entries, tmp_path))
