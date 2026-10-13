@@ -674,4 +674,23 @@ STEP4_FILES = {
     "feature_list": "feature_list.json",
     "artifacts": "preprocess_artifacts.joblib",
     "report": "step4_report.csv",
+    "combined": "preprocessing.csv",
 }
+
+# ---------------------------------------------------------------------------
+# The single combined file: the final preprocessed dataset in one CSV.
+# ---------------------------------------------------------------------------
+# It is built by COLUMN-JOINING the frames Step 4 already produced -- nothing is
+# recomputed and nothing is re-scaled, so it cannot drift from the separate
+# files.  The other eight Step 4 outputs are unchanged.
+COMBINED_CSV = STEP4_OUTPUT_DIR / "preprocessing.csv"
+
+# True  -> the SCALED features (features_scaled.csv)
+# False -> the cleaned but UNSCALED features (features_clean.csv), which is what
+#          a later step wants if it will fit its own scaler on a training split
+COMBINED_USE_SCALED = True
+
+# True -> Src IP, Dst IP, the ports, Timestamp, Source_Capture and Orig_Row are
+#         added as the FIRST columns.  Off by default: those identifiers are
+#         label leakage if they reach a model, and metadata.csv already has them.
+COMBINED_INCLUDE_METADATA = False

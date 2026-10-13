@@ -683,6 +683,9 @@ def run_step4(df: pd.DataFrame | None = None, overwrite: bool | None = None,
     if not overwrite and step4_outputs_exist():
         loaded = load_step4(verbose=verbose)
         loaded["status"] = "loaded_existing"
+        # the combined file is rebuilt from the SAVED files, so it always
+        # matches them even when Step 4 itself was skipped
+        loaded["combined"] = build_combined_from_saved(verbose=verbose)
         return loaded
 
     if df is None:
@@ -723,8 +726,240 @@ def run_step4(df: pd.DataFrame | None = None, overwrite: bool | None = None,
             ("output folder", saved.get("folder")),
         ]))
 
-    return {"status": saved.get("status", "written"), "features_clean": features,
+    combined = save_combined(
+        scaled if config.COMBINED_USE_SCALED else features, labels, metadata,
+        feature_order=list(features.columns), verbose=verbose)
+
+    return {"combined": combined,
+            "status": saved.get("status", "written"), "features_clean": features,
             "features_scaled": scaled, "labels": labels, "metadata": metadata,
             "checks": checks, "report": report, "artifacts": artifacts,
-            "saved": saved, "ok": bool(all_ok and saved.get("ok")),
+            "saved": saved, "ok": bool(all_ok and saved.get("ok")
+                                       and combined.get("ok")),
             "clean_info": clean_info, "encode_info": encode_info}
+
+
+# ===========================================================================
+# 4.4  THE COMBINED FILE -- preprocessing.csv
+# ===========================================================================
+# One CSV holding the final preprocessed dataset: the feature columns followed
+# by the three label columns.  It is built by COLUMN-JOINING the frames Step 4
+# already produced -- nothing is recomputed and nothing is re-scaled -- so it
+# can never drift from features_scaled.csv / labels.csv.  The other eight Step 4
+# outputs are untouched.
+LABEL_OUTPUT_COLUMNS = ["Label", "Label_encoded", "Label_binary"]
+
+
+def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
+                   metadata: pd.DataFrame | None = None,
+                   include_metadata: bool | None = None,
+                   feature_order: Sequence[str] | None = None,
+                   verbose: bool = True) -> pd.DataFrame:
+    """Join features and labels side by side, in the original row order.
+
+    The row counts must match exactly.  They are checked BEFORE the join,
+    because pd.concat would otherwise pad the shorter frame with NaN and the
+    mismatch would only surface much later as mysterious missing values.
+
+    Column order: [metadata] + features (feature_order) + Label, Label_encoded,
+    Label_binary.
+    """
+    include_metadata = (config.COMBINED_INCLUDE_METADATA if include_metadata is None
+                        else include_metadata)
+
+    parts = {"features": len(features), "labels": len(labels)}
+    if include_metadata:
+        if metadata is None:
+            raise PreprocessingError(
+                "COMBINED_INCLUDE_METADATA is True but no metadata frame was given")
+        parts["metadata"] = len(metadata)
+    if len(set(parts.values())) != 1:
+        raise PreprocessingError(
+            "[FAIL] the parts have different row counts and must not be joined: %s. "
+            "Joining them would pad the shorter one with NaN." % parts)
+
+    missing_labels = [c for c in LABEL_OUTPUT_COLUMNS if c not in labels.columns]
+    if missing_labels:
+        raise PreprocessingError("labels is missing %s" % missing_labels)
+
+    order = list(feature_order) if feature_order is not None else list(features.columns)
+    unknown = [c for c in order if c not in features.columns]
+    if unknown:
+        raise PreprocessingError(
+            "feature_list names columns that are not in the features frame: %s" % unknown)
+
+    # reset_index so the join is POSITIONAL: row i of each part is the same flow,
+    # and a stray index would otherwise realign the rows silently.
+    pieces = []
+    if include_metadata:
+        pieces.append(metadata.reset_index(drop=True))
+    pieces.append(features[order].reset_index(drop=True))
+    pieces.append(labels[LABEL_OUTPUT_COLUMNS].reset_index(drop=True))
+
+    combined = pd.concat(pieces, axis=1)
+
+    if verbose:
+        show_table(kv_table([
+            ("rows", f"{len(combined):,}"),
+            ("metadata columns", len(metadata.columns) if include_metadata else 0),
+            ("feature columns", len(order)),
+            ("label columns", len(LABEL_OUTPUT_COLUMNS)),
+            ("total columns", combined.shape[1]),
+        ]), note="Built by column-joining the frames Step 4 already produced -- "
+                 "nothing recomputed, nothing re-scaled.")
+    return combined
+
+
+def verify_combined(combined: pd.DataFrame, features: pd.DataFrame,
+                    labels: pd.DataFrame, metadata: pd.DataFrame | None = None,
+                    expected_rows: int | None = None,
+                    include_metadata: bool | None = None,
+                    path: Path | None = None, verbose: bool = True):
+    """Re-read the combined file and check it against its parts.  [OK]/[FAIL]."""
+    include_metadata = (config.COMBINED_INCLUDE_METADATA if include_metadata is None
+                        else include_metadata)
+    path = Path(path) if path is not None else config.COMBINED_CSV
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, ok: bool, detail: str) -> None:
+        checks.append({"check": name, "result": "[OK]" if ok else "[FAIL]",
+                       "detail": detail})
+
+    exists = path.exists()
+    add("file exists", exists, str(path))
+    if not exists:
+        table = pd.DataFrame(checks)
+        if verbose:
+            show_table(table)
+        return table, False, None
+
+    size_mb = round(path.stat().st_size / 1024 / 1024, 3)
+    add("size on disk", size_mb > 0, "%.3f MB" % size_mb)
+
+    on_disk = pd.read_csv(path, low_memory=False)
+
+    rows_expected = expected_rows if expected_rows is not None else len(features)
+    add("rows match the other Step 4 files", len(on_disk) == rows_expected,
+        "%s on disk vs %s expected" % (f"{len(on_disk):,}", f"{rows_expected:,}"))
+
+    n_meta = len(metadata.columns) if (include_metadata and metadata is not None) else 0
+    cols_expected = n_meta + len(features.columns) + len(LABEL_OUTPUT_COLUMNS)
+    add("columns == %sfeatures + 3 label columns"
+        % ("metadata + " if include_metadata else ""),
+        on_disk.shape[1] == cols_expected,
+        "%d on disk vs %d expected (%d features + 3%s)"
+        % (on_disk.shape[1], cols_expected, len(features.columns),
+           " + %d metadata" % n_meta if n_meta else ""))
+
+    feature_cols = [c for c in features.columns if c in on_disk.columns]
+    block = on_disk[feature_cols].to_numpy(dtype="float64")
+    n_nan, n_inf = int(np.isnan(block).sum()), int(np.isinf(block).sum())
+    add("no NaN in the feature columns", n_nan == 0, "%d NaN cells" % n_nan)
+    add("no inf in the feature columns", n_inf == 0, "%d inf cells" % n_inf)
+
+    have_labels = all(c in on_disk.columns for c in LABEL_OUTPUT_COLUMNS)
+    add("label columns present", have_labels, ", ".join(LABEL_OUTPUT_COLUMNS))
+    if have_labels and len(on_disk) == len(labels):
+        same = all(
+            on_disk[c].astype(str).tolist() == labels[c].astype(str).tolist()
+            for c in LABEL_OUTPUT_COLUMNS)
+        add("labels match labels.csv row by row", same,
+            "all %s rows" % f"{len(on_disk):,}" if same else "a row differs")
+    else:
+        add("labels match labels.csv row by row", False, "row counts differ")
+
+    if len(on_disk) == len(features) and feature_cols:
+        same_features = np.allclose(
+            on_disk[feature_cols].to_numpy(dtype="float64"),
+            features[feature_cols].to_numpy(dtype="float64"),
+            rtol=1e-9, atol=1e-12, equal_nan=True)
+        add("feature values match the source frame", same_features,
+            "%d columns compared" % len(feature_cols))
+    else:
+        add("feature values match the source frame", False, "shapes differ")
+
+    table = pd.DataFrame(checks)
+    all_ok = bool((table["result"] == "[OK]").all())
+    if verbose:
+        show_table(table, note="Read back from **%s**" % path)
+        if not all_ok:
+            show_note("**[FAIL]** -- preprocessing.csv does not agree with the other "
+                      "Step 4 outputs; do not use it.")
+    return table, all_ok, on_disk
+
+
+def save_combined(features: pd.DataFrame, labels: pd.DataFrame,
+                  metadata: pd.DataFrame | None = None,
+                  use_scaled: bool | None = None,
+                  include_metadata: bool | None = None,
+                  feature_order: Sequence[str] | None = None,
+                  verbose: bool = True) -> dict[str, Any]:
+    """Write preprocessing.csv and verify it from disk."""
+    out: dict[str, Any] = {"path": str(config.COMBINED_CSV),
+                           "use_scaled": (config.COMBINED_USE_SCALED
+                                          if use_scaled is None else use_scaled)}
+    folder = prepare_output_dir(config.STEP4_OUTPUT_DIR,
+                                "the combined preprocessing.csv", verbose=verbose)
+    if folder is None:
+        out.update({"status": "skipped_not_windows", "ok": False})
+        return out
+
+    if verbose:
+        show_title("4.4  Final preprocessed dataset (preprocessing.csv)")
+
+    combined = build_combined(features, labels, metadata,
+                              include_metadata=include_metadata,
+                              feature_order=feature_order, verbose=verbose)
+    path = folder / config.STEP4_FILES["combined"]
+    combined.to_csv(path, index=False)
+
+    table, ok, on_disk = verify_combined(
+        combined, features, labels, metadata,
+        expected_rows=len(features), include_metadata=include_metadata,
+        path=path, verbose=verbose)
+
+    out.update({"status": "written", "ok": ok, "combined": combined,
+                "on_disk": on_disk, "verification": table,
+                "rows": len(combined), "columns": combined.shape[1],
+                "size_mb": round(path.stat().st_size / 1024 / 1024, 3)})
+    if verbose:
+        show_table(kv_table([("absolute path", str(path)),
+                             ("size (MB)", out["size_mb"]),
+                             ("rows", f"{out['rows']:,}"),
+                             ("columns", out["columns"]),
+                             ("features from", "features_scaled" if out["use_scaled"]
+                              else "features_clean"),
+                             ("result", "[OK] written and verified" if ok
+                              else "[FAIL] see the table above")]))
+    return out
+
+
+def build_combined_from_saved(verbose: bool = True) -> dict[str, Any]:
+    """Build preprocessing.csv from the SAVED Step 4 files.
+
+    Used when Step 4 itself was skipped (OVERWRITE_STEP4 is False and the
+    outputs already exist), so the combined file still matches them exactly.
+    """
+    folder = config.usable_output_dir(config.STEP4_OUTPUT_DIR)
+    if folder is None:
+        if verbose:
+            print("  [SKIP]  %s" % config.why_unusable(config.STEP4_OUTPUT_DIR))
+        return {"status": "skipped_not_windows", "ok": False}
+
+    names = config.STEP4_FILES
+    use_scaled = config.COMBINED_USE_SCALED
+    features_name = names["features_scaled"] if use_scaled else names["features_clean"]
+    features = pd.read_csv(folder / features_name, low_memory=False)
+    labels = pd.read_csv(folder / names["labels"], low_memory=False)
+    metadata = None
+    if config.COMBINED_INCLUDE_METADATA:
+        metadata = pd.read_csv(folder / names["metadata"], low_memory=False)
+
+    order = None
+    feature_list_path = folder / names["feature_list"]
+    if feature_list_path.exists():
+        order = json.loads(feature_list_path.read_text(encoding="utf-8")).get("features")
+        order = [c for c in (order or []) if c in features.columns] or None
+
+    return save_combined(features, labels, metadata, use_scaled=use_scaled,
+                         feature_order=order, verbose=verbose)
