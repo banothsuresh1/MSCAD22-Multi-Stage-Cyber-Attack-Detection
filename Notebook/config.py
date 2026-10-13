@@ -699,12 +699,40 @@ COMBINED_USE_SCALED = True
 
 # The flow identifiers placed at the FRONT of preprocessing.csv, in this order.
 # They carry their ORIGINAL values from the Step 3 merged data: IP strings as
-# they were, ports and Protocol as integers, Timestamp as the original text.
-# None of them is scaled or one-hot encoded (the Protocol_* one-hot columns are
-# still produced separately and stay in the feature block).
+# they were, ports as integers, Timestamp as the original text.  None of them is
+# scaled.
 # Set it to [] for the old layout, features and labels only.
 COMBINED_ID_COLUMNS = ["Src IP", "Dst IP", "Src Port", "Dst Port",
                        "Protocol", "Timestamp"]
+
+# Of those, the ones READ FROM metadata.csv.  Protocol is deliberately absent:
+# in preprocessing.csv it is a readable TEXT column derived from the Protocol_*
+# one-hot features (see PROTOCOL_TEXT_FROM_ONE_HOT), not a number copied out of
+# metadata.  That is what lets the file be rebuilt from an OLD metadata.csv
+# written before Protocol was added to METADATA_COLUMNS.
+COMBINED_METADATA_ID_COLUMNS = [c for c in COMBINED_ID_COLUMNS if c != "Protocol"]
+
+# The derived Protocol column in preprocessing.csv: one readable name instead of
+# four 0/1 columns.  Exactly one of the four one-hot columns is 1 in every row,
+# so the mapping is lossless and reversible.
+COMBINED_PROTOCOL_COLUMN = "Protocol"
+PROTOCOL_TEXT_FROM_ONE_HOT = {
+    "Protocol_ICMP": "ICMP",
+    "Protocol_TCP": "TCP",
+    "Protocol_UDP": "UDP",
+    PROTOCOL_OTHER_COLUMN: "OTHER",
+}
+PROTOCOL_TEXT_VALUES = ["ICMP", "TCP", "UDP", "OTHER"]
+
+# The four one-hot columns are LEFT OUT of preprocessing.csv -- the single
+# Protocol text column replaces them there.  They stay in features_clean.csv,
+# features_scaled.csv and feature_list.json, which is what a model is trained
+# on, because a model needs numeric input.
+COMBINED_DROP_FEATURE_COLUMNS = list(PROTOCOL_TEXT_FROM_ONE_HOT)
+
+# preprocessing.csv carries ONLY the original Label string, as its last column.
+# Label_encoded and Label_binary are not in it; labels.csv still has all three.
+COMBINED_LABEL_COLUMNS = [LABEL_COLUMN]
 
 # The same list under the name that says what it is FOR: these columns must
 # never be fed to a model.  The attacker IPs decided the labels back in Step 1,
@@ -715,5 +743,6 @@ COMBINED_ID_COLUMNS = ["Src IP", "Dst IP", "Src Port", "Dst Port",
 # columns, which is what a model should actually see.
 ID_COLUMNS_NOT_FOR_TRAINING = COMBINED_ID_COLUMNS
 
-# Port and protocol numbers must stay integers in preprocessing.csv.
-COMBINED_INT_COLUMNS = ["Src Port", "Dst Port", "Protocol"]
+# Port numbers must stay integers in preprocessing.csv.  Protocol is NOT here:
+# it is the readable text column ("TCP", "UDP", "ICMP", "OTHER").
+COMBINED_INT_COLUMNS = ["Src Port", "Dst Port"]
