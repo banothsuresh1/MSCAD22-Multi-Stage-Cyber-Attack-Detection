@@ -483,3 +483,198 @@ def test_load_merged_raises_a_clear_error_when_nothing_is_saved(tmp_path, monkey
     with pytest.raises(dl.DataLoadingError) as err:
         dl.load_merged(verbose=False)
     assert "save_merged" in str(err.value)
+
+
+# ===========================================================================
+# 11. presentation helpers (display layer, no data changes)
+# ===========================================================================
+def test_kv_table_builds_a_two_column_frame():
+    t = dl.kv_table([("rows", 10), ("columns", 76)])
+    assert list(t.columns) == ["metric", "value"]
+    assert t["value"].tolist() == [10, 76]
+
+
+def test_show_helpers_fall_back_to_plain_text_outside_jupyter(capsys):
+    """pytest is not IPython, so these must print rather than call display()."""
+    assert dl.in_notebook() is False
+    dl.show_title("1. Shape and memory")
+    dl.show_table(pd.DataFrame({"metric": ["rows"], "value": [983]}), note="a note")
+    printed = capsys.readouterr().out
+    assert "1. Shape and memory" in printed
+    assert "983" in printed and "a note" in printed
+
+
+def test_show_table_does_not_change_global_pandas_options():
+    before = (pd.get_option("display.max_columns"), pd.get_option("display.width"))
+    dl.show_table(fake_flow_frame(2), all_columns=True)
+    assert (pd.get_option("display.max_columns"), pd.get_option("display.width")) == before
+
+
+def test_summarize_dataset_returns_tables_and_changes_nothing(tmp_path, capsys):
+    six_captures(tmp_path)
+    files, _ = dl.find_flow_csvs(tmp_path, verbose=False)
+    merged, _ = dl.merge_flow_csvs(files=files, verbose=False)
+    merged.loc[merged.index[0], "Flow Byts/s"] = np.inf
+    merged.loc[merged.index[1], "Pkt Len Mean"] = np.nan
+    before = merged.copy(deep=True)
+
+    out = dl.summarize_dataset(merged, make_plot=False, compare_kaggle=False)
+    capsys.readouterr()
+
+    for key in ("shape", "info_table", "label_counts", "crosstab", "time_ranges",
+                "protocol_counts", "nan_inf_table", "describe", "duplicate_rows"):
+        assert key in out, key
+    assert isinstance(out["info_table"], pd.DataFrame)
+    assert list(out["info_table"].columns) == ["column", "dtype", "non_null", "null"]
+    assert len(out["info_table"]) == len(merged.columns)
+    # the dataset itself is untouched
+    pd.testing.assert_frame_equal(merged, before)
+    assert np.isinf(merged["Flow Byts/s"].iloc[0])
+
+
+# ===========================================================================
+# 12. describe() without the inf warnings
+# ===========================================================================
+def test_describe_table_hides_inf_from_the_stats_but_counts_it():
+    df = pd.DataFrame({"Flow Byts/s": [np.inf, 10.0, 20.0, 30.0],
+                       "Tot Fwd Pkts": [1.0, 2.0, 3.0, 4.0]})
+    out = dl.describe_table(df, columns=["Flow Byts/s", "Tot Fwd Pkts"])
+
+    assert out.loc["Flow Byts/s", "inf_count"] == 1
+    assert out.loc["Tot Fwd Pkts", "inf_count"] == 0
+    assert out.loc["Flow Byts/s", "count"] == 3          # the inf row is excluded
+    assert out.loc["Flow Byts/s", "mean"] == 20.0        # finite, not inf
+    assert np.isfinite(out.loc["Flow Byts/s", "std"])
+    assert list(out.columns)[0] == "inf_count"
+
+
+def test_describe_table_does_not_modify_the_input():
+    df = pd.DataFrame({"Flow Byts/s": [np.inf, 1.0]})
+    dl.describe_table(df, columns=["Flow Byts/s"])
+    assert np.isinf(df["Flow Byts/s"].iloc[0]), "the original must keep its inf"
+
+
+def test_describe_emits_no_runtime_warnings_on_inf():
+    import warnings
+    df = pd.DataFrame({"Flow Byts/s": [np.inf, np.inf, 1.0, 2.0, 3.0]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        out = dl.describe_table(df, columns=["Flow Byts/s"])
+    assert out.loc["Flow Byts/s", "inf_count"] == 2
+
+
+# ===========================================================================
+# 13. the Kaggle reference comparison
+# ===========================================================================
+def write_kaggle(folder: Path, name: str, labels: dict) -> Path:
+    """A minimal Kaggle-like file: one feature column plus Label."""
+    folder.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for label, n in labels.items():
+        rows.extend([{"Flow Duration": 1.0, "Label": label}] * n)
+    path = folder / name
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def test_config_has_the_kaggle_csv_dir():
+    assert str(config.KAGGLE_CSV_DIR).endswith("CSV_Original_kaggle")
+    assert config.KAGGLE_CSV_DIR in config.READ_ONLY_DIRS
+    assert config.KAGGLE_CSV_DIR not in config.DIRS_TO_CREATE
+
+
+def test_normalise_label_matches_spacing_case_and_underscores():
+    assert dl.normalise_label("Web_Crwling") == dl.normalise_label("Web Crwling")
+    assert dl.normalise_label(" web crwling ") == dl.normalise_label("Web_Crwling")
+    assert dl.normalise_label("DoS slowloris") == dl.normalise_label("dos_slowloris")
+    assert dl.normalise_label("Port_Scan") != dl.normalise_label("PortScan")
+
+
+def test_find_kaggle_csv_prefers_a_csv_named_mscad(tmp_path):
+    write_kaggle(tmp_path, "other.csv", {"Normal": 1})
+    write_kaggle(tmp_path, "MSCAD.csv", {"Normal": 1})
+    (tmp_path / "MSCAD.xlsx").write_bytes(b"not really a spreadsheet")
+    chosen, candidates = config.find_kaggle_csv(tmp_path)
+    assert chosen.name == "MSCAD.csv"
+    assert len(candidates) == 3
+
+
+def test_find_kaggle_csv_falls_back_to_any_csv(tmp_path):
+    write_kaggle(tmp_path, "labels_export.csv", {"Normal": 1})
+    chosen, _ = config.find_kaggle_csv(tmp_path)
+    assert chosen.name == "labels_export.csv"
+
+
+def test_comparison_matches_labels_that_differ_only_in_spelling(tmp_path, capsys):
+    df = pd.DataFrame({config.LABEL_COLUMN: ["Web_Crwling"] * 23 + ["Normal"] * 10})
+    write_kaggle(tmp_path, "MSCAD.csv", {"Web Crwling": 20, "normal": 10})
+
+    result = dl.compare_labels_with_kaggle(df, folder=tmp_path, verbose=True)
+    capsys.readouterr()
+
+    table = result["table"].set_index("Label")
+    assert table.loc["Web_Crwling", "ours"] == 23
+    assert table.loc["Web_Crwling", "kaggle"] == 20
+    assert table.loc["Web_Crwling", "difference"] == 3
+    assert table.loc["Web_Crwling", "% difference"] == pytest.approx(15.0)
+    assert table.loc["TOTAL (matched)", "ours"] == 33
+    assert table.loc["TOTAL (matched)", "kaggle"] == 30
+    # nothing was renamed: both spellings are reported side by side
+    spelling = result["spelling"]
+    assert {"Web_Crwling", "Normal"} == set(spelling["our spelling"])
+    assert {"Web Crwling", "normal"} == set(spelling["Kaggle spelling"])
+    assert len(result["one_sided"]) == 0
+
+
+def test_comparison_lists_labels_present_on_only_one_side(tmp_path, capsys):
+    df = pd.DataFrame({config.LABEL_COLUMN: ["Normal"] * 5 + ["Benign"] * 3})
+    write_kaggle(tmp_path, "MSCAD.csv", {"Normal": 5, "Infiltration": 7})
+
+    result = dl.compare_labels_with_kaggle(df, folder=tmp_path, verbose=True)
+    capsys.readouterr()
+
+    one_sided = result["one_sided"].set_index("Label")
+    assert one_sided.loc["Benign", "side"] == "ours only"
+    assert one_sided.loc["Benign", "flows"] == 3
+    assert one_sided.loc["Infiltration", "side"] == "Kaggle only"
+    assert one_sided.loc["Infiltration", "flows"] == 7
+    assert set(result["table"]["Label"]) == {"Normal", "TOTAL (matched)"}
+
+
+def test_comparison_handles_a_missing_folder_without_raising(tmp_path, capsys):
+    df = pd.DataFrame({config.LABEL_COLUMN: ["Normal"] * 3})
+    result = dl.compare_labels_with_kaggle(df, folder=tmp_path / "nope", verbose=True)
+    printed = capsys.readouterr().out
+    assert result is None
+    assert "skipped" in printed and "folder does not exist" in printed
+
+
+def test_comparison_handles_an_empty_folder_without_raising(tmp_path, capsys):
+    (tmp_path / "empty").mkdir()
+    df = pd.DataFrame({config.LABEL_COLUMN: ["Normal"] * 3})
+    result = dl.compare_labels_with_kaggle(df, folder=tmp_path / "empty", verbose=True)
+    printed = capsys.readouterr().out
+    assert result is None
+    assert "no .csv or .xlsx" in printed
+
+
+def test_comparison_handles_a_file_without_a_label_column(tmp_path, capsys):
+    pd.DataFrame({"Flow Duration": [1.0, 2.0]}).to_csv(tmp_path / "MSCAD.csv", index=False)
+    df = pd.DataFrame({config.LABEL_COLUMN: ["Normal"] * 3})
+    result = dl.compare_labels_with_kaggle(df, folder=tmp_path, verbose=True)
+    printed = capsys.readouterr().out
+    assert result is None
+    assert "no Label column" in printed
+
+
+def test_comparison_reports_which_file_it_picked(tmp_path, capsys):
+    write_kaggle(tmp_path, "MSCAD.csv", {"Normal": 5})
+    write_kaggle(tmp_path, "zz_other.csv", {"Normal": 99})
+    df = pd.DataFrame({config.LABEL_COLUMN: ["Normal"] * 5})
+
+    result = dl.compare_labels_with_kaggle(df, folder=tmp_path, verbose=True)
+    printed = capsys.readouterr().out
+
+    assert Path(result["info"]["path"]).name == "MSCAD.csv"
+    assert "MSCAD.csv" in printed and "zz_other.csv" in printed
+    assert result["table"].set_index("Label").loc["Normal", "kaggle"] == 5

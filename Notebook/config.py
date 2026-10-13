@@ -54,6 +54,12 @@ RAW_DIR = CSV_OUTPUT_DIR / "raw"          # untouched extractor output
 # REFERENCE ONLY -- the Kaggle MSCAD file.  Read, never written.
 KAGGLE_DIR = DATA_ROOT / "CSV_ORIGINAL"
 
+# Where the Kaggle MSCAD file actually lives.  Step 2's reference comparison
+# uses THIS folder; KAGGLE_DIR above is kept because Step 1 still points at it.
+# Read-only either way: nothing in this project ever writes to them.
+KAGGLE_CSV_DIR = Path(os.environ.get("MSCAD_KAGGLE_CSV_DIR",
+                                     r"C:\MSCAD2022\CSV_Original_kaggle"))
+
 # Code-side folders.
 MERGED_DIR = PROJECT_ROOT / "data" / "merged"      # stays empty in Step 1
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "step1"    # logs and reports
@@ -113,7 +119,7 @@ DIRS_TO_CREATE = [
 ]
 
 # Folders that must never be written to.
-READ_ONLY_DIRS = [PCAPNG_DIR, KAGGLE_DIR]
+READ_ONLY_DIRS = [PCAPNG_DIR, KAGGLE_DIR, KAGGLE_CSV_DIR]
 
 # ===========================================================================
 # 2. EXTERNAL PROGRAMS
@@ -477,6 +483,7 @@ def all_paths() -> dict:
         "CSV_OUTPUT_DIR (output C/D)": CSV_OUTPUT_DIR,
         "RAW_DIR": RAW_DIR,
         "KAGGLE_DIR (reference)": KAGGLE_DIR,
+        "KAGGLE_CSV_DIR (reference)": KAGGLE_CSV_DIR,
         "MERGED_DIR": MERGED_DIR,
         "OUTPUT_DIR": OUTPUT_DIR,
         "SRC_DIR": SRC_DIR,
@@ -504,3 +511,43 @@ def find_kaggle_file() -> Path | None:
             if p.suffix.lower() == ext:
                 return p
     return None
+
+
+def find_kaggle_csv(folder: Path | None = None) -> tuple[Path | None, list[Path]]:
+    """Find the Kaggle MSCAD file in KAGGLE_CSV_DIR.
+
+    Returns (chosen file or None, every candidate found) so the caller can show
+    what was there and say which one it picked -- the choice is never silent.
+
+    Order of preference:
+      1. a .csv whose name starts with "mscad"   (MSCAD.csv, MSCAD_v2.csv, ...)
+      2. any other .csv
+      3. an .xlsx / .xls whose name starts with "mscad"
+      4. any other .xlsx / .xls           (these need openpyxl to read)
+    """
+    base = Path(folder) if folder is not None else KAGGLE_CSV_DIR
+    if not base.is_dir():
+        return None, []
+
+    candidates = sorted(p for p in base.iterdir()
+                        if p.is_file() and p.suffix.lower() in (".csv", ".xlsx", ".xls"))
+    if not candidates:
+        return None, []
+
+    def pick(suffixes, named_mscad):
+        for p in candidates:
+            if p.suffix.lower() not in suffixes:
+                continue
+            if named_mscad and not p.name.lower().startswith("mscad"):
+                continue
+            if not named_mscad and p.name.lower().startswith("mscad"):
+                continue
+            return p
+        return None
+
+    for suffixes, named in (({".csv"}, True), ({".csv"}, False),
+                            ({".xlsx", ".xls"}, True), ({".xlsx", ".xls"}, False)):
+        chosen = pick(suffixes, named)
+        if chosen is not None:
+            return chosen, candidates
+    return candidates[0], candidates

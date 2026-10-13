@@ -640,6 +640,93 @@ DESCRIBE_COLUMNS = ["Flow Duration", "Tot Fwd Pkts", "Tot Bwd Pkts",
 PROTOCOL_NAMES = {6: "TCP", 17: "UDP", 1: "ICMP"}
 
 
+# ---------------------------------------------------------------------------
+# display helpers -- rendered tables in Jupyter, plain text everywhere else
+# ---------------------------------------------------------------------------
+# Every section below builds a DataFrame and hands it to show_table().  Inside
+# Jupyter that renders as a real HTML table; in a plain script or under pytest
+# there is no IPython, so it falls back to printing.  Nothing here changes a
+# value -- it is presentation only.
+def _ipython():
+    """The live IPython shell, or None when not running inside one."""
+    try:
+        from IPython import get_ipython
+    except ImportError:
+        return None
+    try:
+        return get_ipython()
+    except Exception:
+        return None
+
+
+def in_notebook() -> bool:
+    """True when there is an IPython shell to render into."""
+    return _ipython() is not None
+
+
+def show_title(text: str, level: int = 3) -> None:
+    """A section heading: markdown in Jupyter, a banner on the console."""
+    if in_notebook():
+        from IPython.display import Markdown, display
+        display(Markdown("%s %s" % ("#" * level, text)))
+    else:
+        print()
+        print("=" * 78)
+        print(text)
+        print("=" * 78)
+
+
+def show_note(text: str) -> None:
+    """A small italic note under a table."""
+    if in_notebook():
+        from IPython.display import Markdown, display
+        display(Markdown("_%s_" % text))
+    else:
+        print("  %s" % text)
+
+
+def show_table(frame: pd.DataFrame, note: str | None = None,
+               all_columns: bool = False) -> None:
+    """Render a DataFrame as a table, or print it when there is no IPython.
+
+    all_columns=True widens pandas' display just for this one call, using
+    option_context so the global options are left exactly as they were.
+    """
+    if all_columns:
+        # scroll horizontally rather than collapsing columns into "..."
+        with pd.option_context("display.max_columns", None, "display.width", None):
+            if in_notebook():
+                from IPython.display import display
+                display(frame)
+            else:
+                print(frame.to_string())
+    elif in_notebook():
+        from IPython.display import display
+        display(frame)
+    else:
+        with pd.option_context("display.max_columns", None, "display.width", None):
+            print(frame.to_string())
+    if note:
+        show_note(note)
+
+
+def kv_table(pairs: Sequence[tuple[str, Any]]) -> pd.DataFrame:
+    """A plain two-column metric/value table."""
+    return pd.DataFrame({"metric": [k for k, _ in pairs],
+                         "value": [v for _, v in pairs]})
+
+
+def normalise_label(name: Any) -> str:
+    """Fold a label for MATCHING only -- the original spelling is never changed.
+
+    Trims, lower-cases, and treats spaces and underscores as the same, so
+    "Web_Crwling", "web crwling" and " Web Crwling " all match each other.
+    Both original spellings are still shown in the comparison table.
+    """
+    import re
+    return re.sub(r"[\s_]+", "_", str(name).strip().lower())
+
+
 def plot_label_counts(df: pd.DataFrame, path: Path | None = None,
                       verbose: bool = True) -> Path | None:
     """Bar chart of the Label counts on a log scale -> PNG.
@@ -699,215 +786,308 @@ def plot_label_counts(df: pd.DataFrame, path: Path | None = None,
     return path
 
 
-def compare_labels_with_kaggle(df: pd.DataFrame, verbose: bool = True):
-    """Reference only: our Label counts beside the Kaggle MSCAD.csv counts.
+def read_kaggle_labels(folder: Path | None = None, verbose: bool = True):
+    """Read the Label column of the Kaggle MSCAD file.  Never raises.
 
-    Returns None when there is no Kaggle file -- that is not an error, and
-    nothing in Step 2 depends on it.
+    Returns (counts dict keyed by the ORIGINAL label spelling, info dict).
+    counts is None when the folder or the file is missing, or the file cannot
+    be read -- the caller prints one line and carries on, because nothing in
+    Step 2 depends on this comparison.
+    """
+    info: dict[str, Any] = {"path": None, "candidates": [], "problem": None}
+    base = Path(folder) if folder is not None else config.KAGGLE_CSV_DIR
+    info["folder"] = str(base)
+
+    if not base.is_dir():
+        info["problem"] = "folder does not exist: %s" % base
+        if verbose:
+            print("  Kaggle reference skipped -- %s" % info["problem"])
+        return None, info
+
+    path, candidates = config.find_kaggle_csv(base)
+    info["candidates"] = [p.name for p in candidates]
+    if path is None:
+        info["problem"] = "no .csv or .xlsx in %s" % base
+        if verbose:
+            print("  Kaggle reference skipped -- %s" % info["problem"])
+        return None, info
+    info["path"] = str(path)
+
+    try:
+        if path.suffix.lower() in (".xlsx", ".xls"):
+            try:
+                import openpyxl  # noqa: F401
+            except ImportError:
+                info["problem"] = ("%s is a spreadsheet and openpyxl is not installed "
+                                   "(pip install openpyxl)" % path.name)
+                if verbose:
+                    print("  Kaggle reference skipped -- %s" % info["problem"])
+                return None, info
+            kag = pd.read_excel(path)
+        else:
+            kag = pd.read_csv(path, low_memory=False)
+    except Exception as exc:
+        info["problem"] = "could not read %s: %r" % (path.name, exc)
+        if verbose:
+            print("  Kaggle reference skipped -- %s" % info["problem"])
+        return None, info
+
+    label_col = next((c for c in kag.columns
+                      if str(c).strip().lower() == config.LABEL_COLUMN.lower()), None)
+    if label_col is None:
+        info["problem"] = "%s has no Label column" % path.name
+        if verbose:
+            print("  Kaggle reference skipped -- %s" % info["problem"])
+        return None, info
+
+    info["rows"] = len(kag)
+    info["label_column"] = str(label_col)
+    return {str(k): int(v) for k, v in kag[label_col].value_counts().items()}, info
+
+
+def compare_labels_with_kaggle(df: pd.DataFrame, folder: Path | None = None,
+                               verbose: bool = True):
+    """Reference-only comparison of our Label counts with the Kaggle file's.
+
+    Labels are matched on a NORMALISED form (trimmed, lower-cased, spaces and
+    underscores equivalent) but both original spellings are shown -- nothing is
+    renamed.  Labels present on only one side get their own small table.
+
+    Returns a dict with the tables, or None when there is no Kaggle file.
     """
     ours = {str(k): int(v) for k, v in df[config.LABEL_COLUMN].value_counts().items()}
-    path = config.find_kaggle_file()
-    if path is None:
+    theirs, info = read_kaggle_labels(folder, verbose=verbose)
+
+    if theirs is None:
         if verbose:
-            print("  no Kaggle file in %s, so there is nothing to compare against."
-                  % config.KAGGLE_DIR)
-            print("  our own label counts:")
-            for label, n in sorted(ours.items(), key=lambda kv: -kv[1]):
-                print("     %-18s %12s" % (label, f"{n:,}"))
+            show_note("Nothing to compare against, so only our own counts are shown. "
+                      "This is not an error: Step 2 does not depend on the Kaggle file.")
+            show_table(pd.DataFrame({"Label": list(ours),
+                                     "ours": [ours[k] for k in ours]})
+                       .sort_values("ours", ascending=False).reset_index(drop=True))
         return None
 
-    kag = (pd.read_excel(path) if path.suffix.lower() in (".xlsx", ".xls")
-           else pd.read_csv(path, low_memory=False))
-    kag.columns = [str(c).strip() for c in kag.columns]
-    theirs = {str(k): int(v) for k, v in kag[config.LABEL_COLUMN].value_counts().items()}
+    if verbose:
+        if len(info["candidates"]) > 1:
+            show_note("%d files in %s: %s -- using **%s**"
+                      % (len(info["candidates"]), info["folder"],
+                         ", ".join(info["candidates"]), Path(info["path"]).name))
+        else:
+            show_note("Kaggle file: %s (%s rows)"
+                      % (info["path"], f"{info.get('rows', 0):,}"))
+
+    ours_norm = {normalise_label(k): k for k in ours}
+    theirs_norm = {normalise_label(k): k for k in theirs}
+    shared = [k for k in ours_norm if k in theirs_norm]
+
+    rows = []
+    for key in sorted(shared, key=lambda k: -ours[ours_norm[k]]):
+        our_name, their_name = ours_norm[key], theirs_norm[key]
+        o, t = ours[our_name], theirs[their_name]
+        rows.append({"Label": our_name, "ours": o, "kaggle": t,
+                     "difference": o - t,
+                     "% difference": (100.0 * (o - t) / t) if t else float("nan")})
+    table = pd.DataFrame(rows)
+    if len(table):
+        total_o, total_t = int(table["ours"].sum()), int(table["kaggle"].sum())
+        table = pd.concat([table, pd.DataFrame([{
+            "Label": "TOTAL (matched)", "ours": total_o, "kaggle": total_t,
+            "difference": total_o - total_t,
+            "% difference": (100.0 * (total_o - total_t) / total_t) if total_t else float("nan"),
+        }])], ignore_index=True)
+        table["% difference"] = table["% difference"].round(2)
+
+    one_sided = pd.DataFrame(
+        [{"Label": ours_norm[k], "side": "ours only", "flows": ours[ours_norm[k]]}
+         for k in ours_norm if k not in theirs_norm]
+        + [{"Label": theirs_norm[k], "side": "Kaggle only", "flows": theirs[theirs_norm[k]]}
+           for k in theirs_norm if k not in ours_norm])
+
+    spelling = pd.DataFrame(
+        [{"our spelling": ours_norm[k], "Kaggle spelling": theirs_norm[k]}
+         for k in shared if ours_norm[k] != theirs_norm[k]])
 
     if verbose:
-        print("  %-18s %14s %14s   %s" % ("LABEL", "OURS", "KAGGLE", "NOTE"))
-        print("  " + "-" * 66)
-        for label in sorted(set(ours) | set(theirs), key=lambda k: -ours.get(k, 0)):
-            note = ""
-            if label not in theirs:
-                note = "only ours (we create Benign)"
-            elif label not in ours:
-                note = "only Kaggle"
-            print("  %-18s %14s %14s   %s"
-                  % (label, f"{ours.get(label, 0):,}", f"{theirs.get(label, 0):,}", note))
-        print("  " + "-" * 66)
-        print("  %-18s %14s %14s" % ("TOTAL", f"{sum(ours.values()):,}",
-                                     f"{sum(theirs.values()):,}"))
-        print()
-        print("  REFERENCE ONLY. The Kaggle file was produced by the Java CICFlowMeter")
-        print("  with its own settings, so these counts are not expected to be equal,")
-        print("  and nothing here is adjusted to make them match.")
-    return {"ours": ours, "kaggle": theirs}
+        if len(table):
+            show_table(table,
+                       note=("'% difference' is (ours - kaggle) / kaggle x 100. "
+                             "REFERENCE ONLY: the Kaggle file was produced by the Java "
+                             "CICFlowMeter with its own settings, so these are not "
+                             "expected to match and nothing here is adjusted to make "
+                             "them match."))
+        else:
+            show_note("No label matched between the two files.")
+        if len(one_sided):
+            show_note("Labels present on only one side (nothing was renamed):")
+            show_table(one_sided)
+        if len(spelling):
+            show_note("Matched on the normalised form, but spelled differently:")
+            show_table(spelling)
+
+    return {"table": table, "one_sided": one_sided, "spelling": spelling,
+            "ours": ours, "kaggle": theirs, "info": info}
+
+
+def describe_table(df: pd.DataFrame, columns: Sequence[str] | None = None) -> pd.DataFrame:
+    """describe() for the key features, computed WITHOUT inf so it is readable.
+
+    inf makes mean, std and the quantiles undefined and makes numpy emit
+    "invalid value encountered in subtract" warnings.  For the DISPLAY only we
+    replace inf with NaN on a COPY, and add an inf_count column so the inf
+    values are still visible as a number.  df itself is never modified.
+    """
+    cols = [c for c in (columns or DESCRIBE_COLUMNS) if c in df.columns]
+    block = df[cols]
+    inf_counts = {c: int(np.isinf(block[c].to_numpy(dtype="float64")).sum()) for c in cols}
+    finite = block.replace([np.inf, -np.inf], np.nan)
+    out = finite.describe().T
+    out.insert(0, "inf_count", [inf_counts[c] for c in out.index])
+    return out
 
 
 def summarize_dataset(df: pd.DataFrame, make_plot: bool = True,
                       compare_kaggle: bool = True) -> dict[str, Any]:
-    """Print the full overview of the reloaded merged dataset.
+    """The full overview of the reloaded merged dataset, as rendered tables.
 
-    Counts only -- nothing is dropped, filled or changed anywhere in here.
+    Counts and describes only: nothing is dropped, filled or changed anywhere.
     """
     out: dict[str, Any] = {}
+    feats = [c for c in config.KAGGLE_FEATURES if c in df.columns]
 
-    print("=" * 78)
-    print("1. shape and memory")
-    print("=" * 78)
+    # --- 1. shape and memory --------------------------------------------
+    show_title("1. Shape and memory")
     mem_mb = df.memory_usage(deep=True).sum() / 1024 / 1024
-    out["shape"] = df.shape
-    out["memory_mb"] = round(mem_mb, 1)
-    print("  shape          : %s" % (df.shape,))
-    print("  memory (deep)  : %.1f MB" % mem_mb)
-    if mem_mb > 2048:
-        print("  [NOTE] over 2 GB in memory. Step 3 could downcast float64 -> float32")
-        print("         and the identifier columns -> category, which typically saves")
-        print("         50-70%. NOT applied here: Step 2 does not change values.")
-    else:
-        print("  comfortably under the 2 GB mark, so no downcasting is suggested.")
+    out["shape"], out["memory_mb"] = df.shape, round(mem_mb, 1)
+    verdict = ("over 2 GB -- Step 3 could downcast float64 to float32 and the "
+               "identifier columns to category (typically 50-70% smaller). NOT "
+               "applied here: Step 2 does not change values."
+               if mem_mb > 2048 else
+               "comfortably under 2 GB, so no downcasting is suggested")
+    show_table(kv_table([("rows", f"{df.shape[0]:,}"),
+                         ("columns", df.shape[1]),
+                         ("memory, deep (MB)", round(mem_mb, 1)),
+                         ("verdict", verdict)]))
 
-    print()
-    print("=" * 78)
-    print("2. head(10)")
-    print("=" * 78)
-    print(df.head(10).to_string())
+    # --- 2 & 3. head and tail -------------------------------------------
+    show_title("2. head(10)")
+    show_table(df.head(10), all_columns=True,
+               note="All %d columns; scroll sideways to see them." % df.shape[1])
+    show_title("3. tail(5)")
+    show_table(df.tail(5), all_columns=True)
 
-    print()
-    print("=" * 78)
-    print("3. tail(5)")
-    print("=" * 78)
-    print(df.tail(5).to_string())
+    # --- 4. info ---------------------------------------------------------
+    show_title("4. Columns, dtypes and null counts")
+    info_tbl = pd.DataFrame({
+        "column": df.columns,
+        "dtype": [str(t) for t in df.dtypes],
+        "non_null": [int(df[c].notna().sum()) for c in df.columns],
+        "null": [int(df[c].isna().sum()) for c in df.columns],
+    })
+    out["info_table"] = info_tbl
+    show_table(info_tbl)
 
-    print()
-    print("=" * 78)
-    print("4. info()")
-    print("=" * 78)
-    df.info(verbose=True, show_counts=True)
-
-    print()
-    print("=" * 78)
-    print("5. Label counts and percentages")
-    print("=" * 78)
+    # --- 5. labels -------------------------------------------------------
+    show_title("5. Label counts")
     counts = df[config.LABEL_COLUMN].value_counts()
     out["label_counts"] = counts.to_dict()
-    print("  %-18s %12s %9s" % ("LABEL", "FLOWS", "SHARE"))
-    print("  " + "-" * 42)
-    for label, n in counts.items():
-        print("  %-18s %12s %8.3f%%" % (label, f"{n:,}", 100.0 * n / len(df)))
-    print("  " + "-" * 42)
-    print("  %-18s %12s %8.3f%%" % ("TOTAL", f"{len(df):,}", 100.0))
+    label_tbl = pd.DataFrame({"Label": counts.index.astype(str),
+                              "flows": counts.to_numpy(),
+                              "share_%": (100.0 * counts / len(df)).round(3).to_numpy()})
+    label_tbl = pd.concat([label_tbl, pd.DataFrame([{
+        "Label": "TOTAL", "flows": len(df), "share_%": 100.0}])], ignore_index=True)
     imbalance = counts.max() / max(1, counts.min())
     out["imbalance_ratio"] = round(float(imbalance), 1)
-    print("  largest class / smallest class = %.1f : 1   <- Step 3 has to deal with this"
-          % imbalance)
+    show_table(label_tbl,
+               note="Largest class / smallest class = **%.1f : 1** -- Step 3 has to "
+                    "deal with this." % imbalance)
 
-    print()
-    print("=" * 78)
-    print("6. Source_Capture x Label")
-    print("=" * 78)
+    # --- 6. capture x label ---------------------------------------------
+    show_title("6. Source_Capture x Label")
     crosstab = pd.crosstab(df["Source_Capture"], df[config.LABEL_COLUMN], margins=True)
     out["crosstab"] = crosstab
-    print(crosstab.to_string())
+    show_table(crosstab)
 
-    print()
-    print("=" * 78)
-    print("7. first and last Timestamp per capture")
-    print("=" * 78)
+    # --- 7. time ---------------------------------------------------------
+    show_title("7. First and last Timestamp per capture")
     times = df.groupby("Source_Capture")[TIMESTAMP_DT_COLUMN].agg(["min", "max", "count"])
     times["duration"] = times["max"] - times["min"]
     out["time_ranges"] = times
-    print(times.to_string())
     n_nat = int(df[TIMESTAMP_DT_COLUMN].isna().sum())
-    print()
-    print("  unparsed timestamps (NaT): %d" % n_nat)
-    is_sorted = df[TIMESTAMP_DT_COLUMN].dropna().is_monotonic_increasing
-    out["sorted_by_time"] = bool(is_sorted)
-    print("  rows are in ascending Timestamp order: %s" % is_sorted)
+    is_sorted = bool(df[TIMESTAMP_DT_COLUMN].dropna().is_monotonic_increasing)
+    out["sorted_by_time"] = is_sorted
+    show_table(times.reset_index(),
+               note="Unparsed timestamps (NaT): **%d**. Rows in ascending Timestamp "
+                    "order: **%s**." % (n_nat, is_sorted))
 
-    print()
-    print("=" * 78)
-    print("8. identifiers and protocols")
-    print("=" * 78)
+    # --- 8. identifiers and protocols ------------------------------------
+    show_title("8. Identifiers and protocols")
     out["unique_src_ip"] = int(df["Src IP"].nunique())
     out["unique_dst_ip"] = int(df["Dst IP"].nunique())
-    print("  unique Src IP : %s" % f"{out['unique_src_ip']:,}")
-    print("  unique Dst IP : %s" % f"{out['unique_dst_ip']:,}")
-    print("  unique Src Port / Dst Port : %s / %s"
-          % (f"{df['Src Port'].nunique():,}", f"{df['Dst Port'].nunique():,}"))
-    print()
+    show_table(kv_table([("unique Src IP", f"{out['unique_src_ip']:,}"),
+                         ("unique Dst IP", f"{out['unique_dst_ip']:,}"),
+                         ("unique Src Port", f"{df['Src Port'].nunique():,}"),
+                         ("unique Dst Port", f"{df['Dst Port'].nunique():,}")]))
     proto = df["Protocol"].value_counts().sort_index()
     out["protocol_counts"] = proto.to_dict()
-    print("  %-10s %-6s %12s %9s" % ("PROTOCOL", "NAME", "FLOWS", "SHARE"))
-    print("  " + "-" * 42)
-    for num, n in proto.items():
-        print("  %-10s %-6s %12s %8.3f%%"
-              % (num, PROTOCOL_NAMES.get(int(num), "other"), f"{n:,}",
-                 100.0 * n / len(df)))
+    show_table(pd.DataFrame({
+        "Protocol": proto.index.astype(int),
+        "name": [PROTOCOL_NAMES.get(int(n), "other") for n in proto.index],
+        "flows": proto.to_numpy(),
+        "share_%": (100.0 * proto / len(df)).round(3).to_numpy()}))
 
-    print()
-    print("=" * 78)
-    print("9. NaN and inf, per column (only columns with a non-zero count)")
-    print("=" * 78)
-    feats = [c for c in config.KAGGLE_FEATURES if c in df.columns]
+    # --- 9. NaN and inf ---------------------------------------------------
+    show_title("9. NaN and inf per column")
     nan_by_col = df[feats].isna().sum()
-    inf_by_col = pd.Series(
-        {c: int(np.isinf(df[c].to_numpy(dtype="float64")).sum()) for c in feats})
-    out["nan_total"] = int(nan_by_col.sum())
-    out["inf_total"] = int(inf_by_col.sum())
-    shown = False
-    for c in feats:
-        if nan_by_col[c] or inf_by_col[c]:
-            shown = True
-            print("  %-22s NaN %8s   inf %8s"
-                  % (c, f"{int(nan_by_col[c]):,}", f"{int(inf_by_col[c]):,}"))
-    if not shown:
-        print("  no column has any NaN or inf.")
-    print()
-    print("  totals: NaN %s cells, inf %s cells (across the 66 features)"
-          % (f"{out['nan_total']:,}", f"{out['inf_total']:,}"))
-    print("  Both are KEPT. inf in Flow Byts/s and Flow Pkts/s is the correct answer")
-    print("  for a zero-duration flow; Step 3 decides what to do about it.")
+    inf_by_col = pd.Series({c: int(np.isinf(df[c].to_numpy(dtype="float64")).sum())
+                            for c in feats})
+    out["nan_total"], out["inf_total"] = int(nan_by_col.sum()), int(inf_by_col.sum())
+    nz = pd.DataFrame({"column": feats,
+                       "NaN": nan_by_col.reindex(feats).to_numpy(),
+                       "inf": inf_by_col.reindex(feats).to_numpy()})
+    nz = nz[(nz["NaN"] > 0) | (nz["inf"] > 0)].reset_index(drop=True)
+    out["nan_inf_table"] = nz
+    if len(nz):
+        show_table(nz,
+                   note="Totals across the 66 features: **%s NaN**, **%s inf**. Both are "
+                        "KEPT -- inf in a rate column is the correct answer for a "
+                        "zero-duration flow, and Step 3 decides what to do about it."
+                        % (f"{out['nan_total']:,}", f"{out['inf_total']:,}"))
+    else:
+        show_table(pd.DataFrame([{"column": "(none)", "NaN": 0, "inf": 0}]),
+                   note="No column has any NaN or inf.")
 
-    print()
-    print("=" * 78)
-    print("10. duplicates (counted, NOT dropped)")
-    print("=" * 78)
+    # --- 10. duplicates ---------------------------------------------------
+    show_title("10. Duplicates (counted, never dropped)")
     exact = int(df.duplicated().sum())
     same_features = int(df.duplicated(subset=feats).sum())
     same_flow = int(df.duplicated(subset=config.ID_COLUMNS).sum())
-    out["duplicate_rows"] = exact
-    out["identical_feature_rows"] = same_features
-    print("  exact duplicate rows (all %d columns) : %s"
-          % (len(df.columns), f"{exact:,}"))
-    print("  rows with identical 66-feature values : %s   (%.2f%% of the data)"
-          % (f"{same_features:,}", 100.0 * same_features / len(df)))
-    print("  rows with a repeated 5-tuple+Timestamp: %s" % f"{same_flow:,}")
-    print("  Expected in floods, port scans and brute force, where thousands of")
-    print("  flows genuinely look the same. Nothing is dropped here.")
+    out["duplicate_rows"], out["identical_feature_rows"] = exact, same_features
+    show_table(kv_table([
+        ("exact duplicate rows (all %d columns)" % df.shape[1], f"{exact:,}"),
+        ("rows with identical 66-feature values", f"{same_features:,}"),
+        ("  as a share of the data", "%.2f%%" % (100.0 * same_features / len(df))),
+        ("rows with a repeated 5-tuple + Timestamp", f"{same_flow:,}")]),
+        note="Expected in floods, port scans and brute force, where thousands of flows "
+             "genuinely look the same. Nothing is dropped here.")
 
-    print()
-    print("=" * 78)
-    print("11. describe() for the key features")
-    print("=" * 78)
-    cols = [c for c in DESCRIBE_COLUMNS if c in df.columns]
-    desc = df[cols].describe().T
+    # --- 11. describe -----------------------------------------------------
+    show_title("11. describe() for the key features")
+    desc = describe_table(df)
     out["describe"] = desc
-    print(desc.to_string())
-    print()
-    print("  NOTE: inf values make mean/std inf for the rate columns. That is")
-    print("  arithmetic, not a bug -- see section 9.")
+    show_table(desc,
+               note="Computed on a copy with inf replaced by NaN, so the statistics are "
+                    "readable and numpy emits no 'invalid value' warnings; the inf_count "
+                    "column shows how many inf values each feature really has. The "
+                    "dataset itself still holds its inf values.")
 
+    # --- 12. chart --------------------------------------------------------
     if make_plot:
-        print()
-        print("=" * 78)
-        print("12. Label bar chart (log scale)")
-        print("=" * 78)
+        show_title("12. Label bar chart (log scale)")
         out["plot"] = plot_label_counts(df)
 
+    # --- 13. Kaggle reference --------------------------------------------
     if compare_kaggle:
-        print()
-        print("=" * 78)
-        print("13. our Label counts vs the Kaggle MSCAD.csv (reference only)")
-        print("=" * 78)
+        show_title("13. Our Label counts vs the Kaggle MSCAD file (reference only)")
         out["kaggle_comparison"] = compare_labels_with_kaggle(df)
 
     return out
