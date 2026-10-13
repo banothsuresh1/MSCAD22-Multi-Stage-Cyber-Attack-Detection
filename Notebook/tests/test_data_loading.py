@@ -1105,7 +1105,8 @@ def test_usable_output_dir_refuses_a_windows_path_off_windows(monkeypatch):
     assert config.usable_output_dir(r"C:\MSCAD2022\outputs") is not None
 
 
-def test_prepare_output_dir_creates_nothing_for_a_windows_path(tmp_path, monkeypatch, capsys):
+def test_prepare_output_dir_creates_nothing_for_a_windows_path(tmp_path, monkeypatch, capsys,
+                                                               assert_no_leaked_output):
     monkeypatch.setattr(config.os, "name", "posix")
     monkeypatch.chdir(tmp_path)                      # so any mistake lands here
 
@@ -1114,10 +1115,11 @@ def test_prepare_output_dir_creates_nothing_for_a_windows_path(tmp_path, monkeyp
 
     assert folder is None
     assert "[SKIP]" in printed and "Windows path" in printed
-    assert list(tmp_path.iterdir()) == [], "nothing may be created"
+    assert_no_leaked_output("prepare_output_dir")
 
 
-def test_save_merged_refuses_rather_than_making_a_junk_folder(tmp_path, monkeypatch, capsys):
+def test_save_merged_refuses_rather_than_making_a_junk_folder(tmp_path, monkeypatch, capsys,
+                                                              assert_no_leaked_output):
     monkeypatch.setattr(config, "STEP3_OUTPUT_DIR", Path(r"C:\MSCAD2022\outputs\step3"))
     monkeypatch.setattr(config, "MERGED_CSV",
                         Path(r"C:\MSCAD2022\outputs\step3\MSCAD_merged.csv"))
@@ -1129,10 +1131,11 @@ def test_save_merged_refuses_rather_than_making_a_junk_folder(tmp_path, monkeypa
 
     assert result["status"] == "skipped_not_windows"
     assert result["ok"] is False
-    assert list(tmp_path.iterdir()) == [], "no 'C:\\\\MSCAD2022' folder may appear"
+    assert_no_leaked_output("save_merged")
 
 
-def test_every_writing_helper_is_guarded(tmp_path, monkeypatch, capsys):
+def test_every_writing_helper_is_guarded(tmp_path, monkeypatch, capsys,
+                                         assert_no_leaked_output):
     """plot, step 3 reports and the Kaggle comparison all skip, none create."""
     monkeypatch.setattr(config, "STEP3_OUTPUT_DIR", Path(r"C:\MSCAD2022\outputs\step3"))
     monkeypatch.setattr(config.os, "name", "posix")
@@ -1144,7 +1147,35 @@ def test_every_writing_helper_is_guarded(tmp_path, monkeypatch, capsys):
         **{"Source_Capture": "N-0", "Timestamp_dt": pd.Timestamp("2020-01-01")}),
         verbose=False) == {}
     capsys.readouterr()
-    assert list(tmp_path.iterdir()) == []
+    assert_no_leaked_output("plot_label_counts / save_step3_reports")
+
+
+def test_the_leak_fixture_catches_a_windows_named_folder(tmp_path,
+                                                        assert_no_leaked_output):
+    """The replacement assertion must have teeth, not just pass.
+
+    `assert not (tmp_path / "C:").exists()` had none on Windows: joining a bare
+    drive letter resets the anchor, so on a C: temp drive that expression IS
+    tmp_path and the assertion failed on every run.  Checking the NAMES in the
+    directory behaves identically on both operating systems.
+    """
+    assert_no_leaked_output("nothing yet")          # clean to begin with
+
+    # exactly what an unguarded mkdir() produces on Linux
+    (tmp_path / "C:\\MSCAD2022").mkdir()
+    with pytest.raises(AssertionError) as err:
+        assert_no_leaked_output("a deliberately broken guard")
+    assert "Windows path" in str(err.value)
+    assert "C:" in str(err.value)
+
+
+def test_the_leak_fixture_catches_any_stray_output(tmp_path,
+                                                   assert_no_leaked_output):
+    (tmp_path / "step3").mkdir()
+    with pytest.raises(AssertionError) as err:
+        assert_no_leaked_output("a deliberately broken guard")
+    assert "should have created nothing" in str(err.value)
+    assert "step3" in str(err.value)
 
 
 def test_no_tracked_file_has_a_windows_path_or_backslash():
