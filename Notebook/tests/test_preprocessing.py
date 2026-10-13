@@ -426,3 +426,171 @@ def test_step4_output_dir_is_under_data_root_not_the_repo():
     assert str(config.DATA_ROOT) in str(REAL_STEP4_DIR)
     assert str(config.PROJECT_ROOT) not in str(REAL_STEP4_DIR)
     assert REAL_STEP4_DIR == config.OUTPUTS_DIR / "step4"
+
+
+# ===========================================================================
+# 11. the combined file -- preprocessing.csv
+# ===========================================================================
+def test_combined_file_is_written_with_features_then_labels():
+    df = make_merged()
+    result = pp.run_step4(df, overwrite=True, verbose=False)
+
+    path = config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"]
+    assert path.exists() and path.name == "preprocessing.csv"
+
+    on_disk = pd.read_csv(path, low_memory=False)
+    features = result["features_scaled"]
+
+    assert len(on_disk) == len(df)
+    assert on_disk.shape[1] == features.shape[1] + 3
+    # features first, in feature order; the three label columns last
+    assert list(on_disk.columns[:features.shape[1]]) == list(features.columns)
+    assert list(on_disk.columns[-3:]) == ["Label", "Label_encoded", "Label_binary"]
+    assert result["combined"]["ok"] is True
+
+
+def test_combined_row_order_matches_the_separate_files():
+    df = make_merged()
+    result = pp.run_step4(df, overwrite=True, verbose=False)
+    folder = config.STEP4_OUTPUT_DIR
+
+    combined = pd.read_csv(folder / config.STEP4_FILES["combined"], low_memory=False)
+    labels = pd.read_csv(folder / config.STEP4_FILES["labels"], low_memory=False)
+    scaled = pd.read_csv(folder / config.STEP4_FILES["features_scaled"], low_memory=False)
+
+    assert combined["Label"].tolist() == labels["Label"].tolist()
+    assert combined["Label_encoded"].tolist() == labels["Label_encoded"].tolist()
+    assert combined["Label_binary"].tolist() == labels["Label_binary"].tolist()
+    # row i is the same flow, and it is the ORIGINAL order
+    assert combined["Label"].tolist() == df[config.LABEL_COLUMN].tolist()
+    for col in scaled.columns:
+        assert np.allclose(combined[col].to_numpy(dtype="float64"),
+                           scaled[col].to_numpy(dtype="float64"),
+                           rtol=1e-9, equal_nan=True), col
+
+
+def test_combined_uses_scaled_features_by_default():
+    df = make_merged()
+    result = pp.run_step4(df, overwrite=True, verbose=False)
+    combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"])
+
+    scaled_cols = result["artifacts"]["scaled_columns"]
+    block = combined[scaled_cols].to_numpy(dtype="float64")
+    assert block.min() >= -1e-9 and block.max() <= 1 + 1e-9, "must be the SCALED features"
+
+
+def test_combined_use_scaled_false_takes_the_unscaled_features(monkeypatch):
+    df = make_merged()
+    monkeypatch.setattr(config, "COMBINED_USE_SCALED", False)
+    result = pp.run_step4(df, overwrite=True, verbose=False)
+
+    combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"])
+    clean = result["features_clean"]
+    assert combined["Flow Duration"].max() == pytest.approx(clean["Flow Duration"].max())
+    assert combined["Flow Duration"].max() > 1.0, "unscaled values are not in [0,1]"
+
+
+def test_combined_include_metadata_puts_metadata_first(monkeypatch):
+    df = make_merged()
+    monkeypatch.setattr(config, "COMBINED_INCLUDE_METADATA", True)
+    result = pp.run_step4(df, overwrite=True, verbose=False)
+
+    combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"],
+                           low_memory=False)
+    meta_cols = list(result["metadata"].columns)
+    n_features = result["features_scaled"].shape[1]
+
+    assert list(combined.columns[:len(meta_cols)]) == meta_cols
+    assert combined.shape[1] == len(meta_cols) + n_features + 3
+    assert list(combined.columns[-3:]) == ["Label", "Label_encoded", "Label_binary"]
+    assert combined["Orig_Row"].tolist() == df["Orig_Row"].tolist()
+    assert result["combined"]["ok"] is True
+
+
+def test_combined_defaults_exclude_metadata():
+    assert config.COMBINED_INCLUDE_METADATA is False
+    assert config.COMBINED_USE_SCALED is True
+    df = make_merged()
+    pp.run_step4(df, overwrite=True, verbose=False)
+    combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"],
+                           low_memory=False)
+    for col in config.METADATA_COLUMNS:
+        assert col not in combined.columns, col
+
+
+def test_building_from_saved_files_gives_the_same_result():
+    """The skip path (OVERWRITE_STEP4 False) must produce an identical file."""
+    df = make_merged()
+    pp.run_step4(df, overwrite=True, verbose=False)
+    path = config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"]
+    from_run = pd.read_csv(path, low_memory=False)
+
+    path.unlink()                                  # force a rebuild from the saved files
+    rebuilt = pp.build_combined_from_saved(verbose=False)
+
+    assert rebuilt["ok"] is True
+    from_saved = pd.read_csv(path, low_memory=False)
+    pd.testing.assert_frame_equal(from_run, from_saved)
+
+
+def test_skip_path_rebuilds_the_combined_file():
+    df = make_merged()
+    pp.run_step4(df, overwrite=True, verbose=False)
+    again = pp.run_step4(df, overwrite=False, verbose=False)
+
+    assert again["status"] == "loaded_existing"
+    assert again["combined"]["ok"] is True
+    assert (config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"]).exists()
+
+
+def test_mismatched_row_counts_fail_instead_of_padding_with_nan():
+    df = make_merged()
+    features, labels, metadata, _i = pp.clean_dataset(df, verbose=False)
+    features, labels, _e = pp.encode_dataset(features, labels, verbose=False)
+
+    with pytest.raises(pp.PreprocessingError) as err:
+        pp.build_combined(features, labels.iloc[:5], verbose=False)
+    assert "different row counts" in str(err.value)
+    assert "NaN" in str(err.value)
+
+
+def test_combined_verification_detects_a_tampered_file():
+    df = make_merged()
+    result = pp.run_step4(df, overwrite=True, verbose=False)
+    path = config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"]
+
+    # drop a row on disk: the re-read check must catch it
+    tampered = pd.read_csv(path, low_memory=False).iloc[:-1]
+    tampered.to_csv(path, index=False)
+
+    table, ok, _on_disk = pp.verify_combined(
+        result["features_scaled"], result["features_scaled"], result["labels"],
+        path=path, verbose=False)
+    assert ok is False
+    assert "[FAIL]" in set(table["result"])
+
+
+def test_combined_has_no_nan_or_inf():
+    df = make_merged()
+    result = pp.run_step4(df, overwrite=True, verbose=False)
+    combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"],
+                           low_memory=False)
+    features = [c for c in combined.columns if c not in pp.LABEL_OUTPUT_COLUMNS]
+    block = combined[features].to_numpy(dtype="float64")
+    assert int(np.isnan(block).sum()) == 0
+    assert int(np.isinf(block).sum()) == 0
+
+
+def test_other_step4_files_are_unchanged_by_the_combined_file():
+    """Adding preprocessing.csv must not alter the eight existing outputs."""
+    df = make_merged()
+    pp.run_step4(df, overwrite=True, verbose=False)
+    folder = config.STEP4_OUTPUT_DIR
+    before = {name: (folder / name).read_bytes()
+              for key, name in config.STEP4_FILES.items() if key != "combined"}
+
+    (folder / config.STEP4_FILES["combined"]).unlink()
+    pp.build_combined_from_saved(verbose=False)
+
+    for name, content in before.items():
+        assert (folder / name).read_bytes() == content, name
