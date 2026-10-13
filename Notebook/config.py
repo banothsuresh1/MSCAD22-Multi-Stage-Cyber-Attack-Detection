@@ -104,6 +104,7 @@ CSV_INPUT_DIR = CSV_OUTPUT_DIR          # C:\MSCAD2022\CSVs -- Step 2 reads here
 OUTPUTS_DIR = DATA_ROOT / "outputs"     # C:\MSCAD2022\outputs
 STEP2_OUTPUT_DIR = OUTPUTS_DIR / "step2"   # acquisition report
 STEP3_OUTPUT_DIR = OUTPUTS_DIR / "step3"   # merged dataset + its reports
+STEP4_OUTPUT_DIR = OUTPUTS_DIR / "step4"   # preprocessing outputs
 
 MERGED_CSV = STEP3_OUTPUT_DIR / "MSCAD_merged.csv"
 MERGED_PARQUET = STEP3_OUTPUT_DIR / "MSCAD_merged.parquet"
@@ -130,6 +131,7 @@ DIRS_TO_CREATE = [
     OUTPUTS_DIR,
     STEP2_OUTPUT_DIR,
     STEP3_OUTPUT_DIR,
+    STEP4_OUTPUT_DIR,
     NOTEBOOKS_DIR,
 ]
 
@@ -505,6 +507,7 @@ def all_paths() -> dict:
         "OUTPUT_DIR (step 1)": OUTPUT_DIR,
         "STEP2_OUTPUT_DIR": STEP2_OUTPUT_DIR,
         "STEP3_OUTPUT_DIR": STEP3_OUTPUT_DIR,
+        "STEP4_OUTPUT_DIR": STEP4_OUTPUT_DIR,
         "SRC_DIR": SRC_DIR,
         "TESTS_DIR": TESTS_DIR,
         "PYTHON_EXE": Path(PYTHON_EXE),
@@ -611,3 +614,64 @@ def why_unusable(path) -> str:
             "written. Run on Windows, or point DATA_ROOT at a local folder "
             "(MSCAD_DATA_ROOT=/some/dir)."
             % (path, PureWindowsPath(str(path)).drive, os.name))
+
+
+# ===========================================================================
+# 8. STEP 4 -- PREPROCESSING (clean, encode, scale)
+# ===========================================================================
+# Step 4 cleans, encodes and scales the WHOLE merged dataset.  It deliberately
+# does NOT split into train/test, does NOT touch the class imbalance, and does
+# NOT select features or model anything -- those are later steps.
+
+# What to do with inf in the rate columns (zero-duration flows divide by zero):
+#   "cap"        -> +inf becomes that column's maximum FINITE value, and a
+#                   binary column "zero_duration" records which rows they were
+#   "nan_median" -> inf becomes NaN, then median imputation fills it
+INF_STRATEGY = "cap"
+
+# "minmax" scales every numeric feature into [0, 1]; "standard" centres it on
+# mean 0 with unit variance.
+SCALER = "minmax"
+
+# False = if the Step 4 outputs already exist, load them instead of redoing it.
+OVERWRITE_STEP4 = False
+
+# Columns that are NOT features.  They are removed from the feature matrix and
+# kept in metadata.csv, in the same row order, because the attack-sequence and
+# attack-state-graph work in a later step needs them.  Protocol is deliberately
+# NOT here: it IS a feature, and gets one-hot encoded.
+METADATA_COLUMNS = [
+    "Src IP", "Dst IP", "Src Port", "Dst Port",
+    "Timestamp", "Timestamp_dt", "Source_Capture", "Orig_Row",
+]
+
+# Labels that count as "not an attack" for the binary target.
+# "Benign" (a non-attacker flow inside an attack capture) and "Normal" (the N-0
+# capture) stay SEPARATE classes for the multi-class target; they only share
+# the binary 0.
+BENIGN_LABELS = ["Benign", "Normal"]
+
+# Optional label fixes, applied ONLY if non-empty and always reported.
+# The dataset's own spelling is kept by default -- nothing is renamed silently.
+# Example:  LABEL_MAP = {"Web_Crwling": "Web_Crawling"}
+LABEL_MAP: dict[str, str] = {}
+
+# Protocol numbers that get their own one-hot column; anything else (IGMP = 2,
+# say) falls into Protocol_other so an unseen value can never be dropped.
+PROTOCOL_ONE_HOT = {1: "Protocol_ICMP", 6: "Protocol_TCP", 17: "Protocol_UDP"}
+PROTOCOL_OTHER_COLUMN = "Protocol_other"
+
+# The binary column added when INF_STRATEGY == "cap".
+ZERO_DURATION_COLUMN = "zero_duration"
+
+# Step 4 output files (all inside STEP4_OUTPUT_DIR).
+STEP4_FILES = {
+    "features_clean": "features_clean.csv",      # cleaned + encoded, NOT scaled
+    "features_scaled": "features_scaled.csv",    # cleaned + encoded + scaled
+    "labels": "labels.csv",                      # Label, Label_encoded, Label_binary
+    "metadata": "metadata.csv",                  # the non-feature columns
+    "label_mapping": "label_mapping.json",
+    "feature_list": "feature_list.json",
+    "artifacts": "preprocess_artifacts.joblib",
+    "report": "step4_report.csv",
+}
