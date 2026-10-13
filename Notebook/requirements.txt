@@ -14,17 +14,22 @@
 
 pandas>=2.0         # load and merge the per-capture flow CSVs
 numpy>=1.24         # numerics, inf/NaN handling
-matplotlib>=3.7     # the Step 2 label bar chart
+matplotlib>=3.7     # the Step 3 label bar chart, the Step 5 split chart
 pyarrow>=14.0       # fast Parquet read/write for the merged dataset
 tqdm>=4.65          # progress bars while loading the CSVs
 jupyter>=1.0        # the notebook front-end
-pytest>=7.4         # tests\test_data_loading.py, tests\test_preprocessing.py
+pytest>=7.4         # tests\test_data_loading.py, test_preprocessing.py,
+                    # test_splitting.py
 scikit-learn>=1.3   # Step 4: LabelEncoder, MinMaxScaler, StandardScaler
+                    # Step 5: train_test_split, the train-fitted scaler
 joblib>=1.3         # Step 4: saving the fitted scaler and encoders
+                    # Step 5: saving scaler_train.joblib
 
 # ---------------------------------------------------------------------------
-# LATER STAGES (Step 5 onward) -- deliberately commented out.
-# Steps 2-4 must not install or import any of these.
+# LATER STAGES (Step 6 onward) -- deliberately commented out.
+# Steps 2-5 must not install or import any of these.  Step 5 is the
+# train/test split only: imbalanced-learn stays commented out because the
+# class imbalance is deliberately NOT handled there.
 # ---------------------------------------------------------------------------
 # xgboost>=2.0             # XGBoost classifier
 # tensorflow>=2.16         # autoencoder, LSTM, CNN, hybrid CNN-LSTM

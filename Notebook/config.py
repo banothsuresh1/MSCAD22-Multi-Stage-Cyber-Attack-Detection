@@ -134,6 +134,8 @@ DIRS_TO_CREATE = [
     STEP4_OUTPUT_DIR,
     NOTEBOOKS_DIR,
 ]
+# STEP5_OUTPUT_DIR is appended to this list at the bottom of the file, where it
+# is defined -- DIRS_TO_CREATE is declared here, before the Step 5 block.
 
 # Folders that must never be written to.
 READ_ONLY_DIRS = [PCAPNG_DIR, KAGGLE_DIR, KAGGLE_CSV_DIR]
@@ -746,3 +748,71 @@ ID_COLUMNS_NOT_FOR_TRAINING = COMBINED_ID_COLUMNS
 # Port numbers must stay integers in preprocessing.csv.  Protocol is NOT here:
 # it is the readable text column ("TCP", "UDP", "ICMP", "OTHER").
 COMBINED_INT_COLUMNS = ["Src Port", "Dst Port"]
+
+
+# ===========================================================================
+# STEP 5 -- train / test validation split
+# ===========================================================================
+# Input:  the Step 4 outputs (features_clean.csv, labels.csv, metadata.csv).
+# Output: STEP5_OUTPUT_DIR, created if missing.
+#
+# Step 5 does the split and NOTHING else: no SMOTE, no resampling, no class
+# weights, no feature selection, no modelling.  Those are later steps.
+STEP5_OUTPUT_DIR = OUTPUTS_DIR / "step5"      # C:\MSCAD2022\outputs\step5
+
+# 20% of the rows go to the test set.
+TEST_SIZE = 0.20
+
+# Fixed so the split is reproducible; the same value as RANDOM_SEED above, kept
+# as its own name because sklearn calls this argument random_state.
+RANDOM_STATE = RANDOM_SEED
+
+# Stratify on the MULTICLASS label, not the binary one.  Stratifying on
+# Label_binary would balance attack-vs-benign while letting a 23-row class land
+# entirely in one side of the split.
+STRATIFY_COLUMN = LABEL_COLUMN
+
+# False = if the Step 5 outputs already exist, load them instead of resplitting.
+OVERWRITE_STEP5 = False
+
+# Scaled test values may fall slightly outside [0, 1]: the scaler is fitted on
+# the training rows only, so a test row can hold a larger value than any
+# training row.  That is expected and is REPORTED, not hidden.  Clipping would
+# quietly destroy real information, so it is off by default.
+CLIP_TEST_TO_TRAIN_RANGE = False
+
+# A class share may differ between train and test by less than this many
+# PERCENTAGE POINTS for the split to be called stratified.
+SHARE_TOLERANCE_PP = 0.1
+
+# The row count Step 4 is expected to hand over.  It is only a cross-check that
+# prints a note: the real check is that features_clean.csv, labels.csv and
+# metadata.csv all have the SAME number of rows, which is what matters for the
+# split.  Set it to None to drop the note.
+STEP5_EXPECTED_ROWS = 105_387
+
+# Step 5 output files (all inside STEP5_OUTPUT_DIR).
+STEP5_FILES = {
+    "X_train": "X_train.csv",                    # scaled with the TRAIN-fitted scaler
+    "X_test": "X_test.csv",
+    "X_train_unscaled": "X_train_unscaled.csv",  # straight from features_clean.csv
+    "X_test_unscaled": "X_test_unscaled.csv",
+    "y_train": "y_train.csv",                    # Label, Label_encoded, Label_binary
+    "y_test": "y_test.csv",
+    "meta_train": "meta_train.csv",              # identifiers, incl. Orig_Row
+    "meta_test": "meta_test.csv",
+    "train_indices": "train_indices.csv",        # row positions in the Step 4 files
+    "test_indices": "test_indices.csv",
+    "train_view": "train_view.csv",              # preprocessing.csv layout, for viewing
+    "test_view": "test_view.csv",
+    "class_balance": "class_balance.csv",        # per-class train/test counts
+    "binary_balance": "binary_balance.csv",      # the same for Label_binary
+    "leakage": "leakage.csv",                    # test rows also present in train
+    "split_summary": "split_summary.csv",
+    "scaler": "scaler_train.joblib",             # fitted on the TRAIN rows only
+    "report": "step5_report.csv",
+    "chart": "split_class_counts.png",
+}
+
+# Declared above, before the Step 5 block existed.
+DIRS_TO_CREATE.append(STEP5_OUTPUT_DIR)
