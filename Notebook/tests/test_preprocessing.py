@@ -169,13 +169,16 @@ def test_metadata_columns_are_not_in_the_features():
     df = make_merged()
     features, labels, metadata, _info = pp.clean_dataset(df, verbose=False)
 
+    shared = set(config.METADATA_SHARED_COLUMNS)
     for col in config.METADATA_COLUMNS:
-        assert col not in features.columns, col
         assert col in metadata.columns, col
+        if col not in shared:
+            assert col not in features.columns, col
     assert config.LABEL_COLUMN not in features.columns
     assert config.LABEL_COLUMN in labels.columns
-    # Protocol is a FEATURE, not metadata
-    assert "Protocol" not in metadata.columns
+    # Protocol is BOTH: metadata keeps the raw number, the features one-hot it
+    assert "Protocol" in metadata.columns
+    assert "Protocol" in features.columns
 
 
 def test_row_count_and_row_order_are_preserved():
@@ -440,11 +443,13 @@ def test_combined_file_is_written_with_features_then_labels():
 
     on_disk = pd.read_csv(path, low_memory=False)
     features = result["features_scaled"]
+    ids = list(config.COMBINED_ID_COLUMNS)
 
     assert len(on_disk) == len(df)
-    assert on_disk.shape[1] == features.shape[1] + 3
-    # features first, in feature order; the three label columns last
-    assert list(on_disk.columns[:features.shape[1]]) == list(features.columns)
+    assert on_disk.shape[1] == len(ids) + features.shape[1] + 3
+    # identifiers first, then the features in feature order, then the labels
+    assert list(on_disk.columns[:len(ids)]) == ids
+    assert list(on_disk.columns[len(ids):len(ids) + features.shape[1]]) == list(features.columns)
     assert list(on_disk.columns[-3:]) == ["Label", "Label_encoded", "Label_binary"]
     assert result["combined"]["ok"] is True
 
@@ -490,31 +495,36 @@ def test_combined_use_scaled_false_takes_the_unscaled_features(monkeypatch):
     assert combined["Flow Duration"].max() > 1.0, "unscaled values are not in [0,1]"
 
 
-def test_combined_include_metadata_puts_metadata_first(monkeypatch):
+def test_empty_id_columns_gives_the_old_layout(monkeypatch):
     df = make_merged()
-    monkeypatch.setattr(config, "COMBINED_INCLUDE_METADATA", True)
+    monkeypatch.setattr(config, "COMBINED_ID_COLUMNS", [])
     result = pp.run_step4(df, overwrite=True, verbose=False)
 
     combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"],
                            low_memory=False)
-    meta_cols = list(result["metadata"].columns)
-    n_features = result["features_scaled"].shape[1]
+    features = result["features_scaled"]
 
-    assert list(combined.columns[:len(meta_cols)]) == meta_cols
-    assert combined.shape[1] == len(meta_cols) + n_features + 3
+    assert combined.shape[1] == features.shape[1] + 3
+    assert list(combined.columns[:features.shape[1]]) == list(features.columns)
     assert list(combined.columns[-3:]) == ["Label", "Label_encoded", "Label_binary"]
-    assert combined["Orig_Row"].tolist() == df["Orig_Row"].tolist()
+    for col in ("Src IP", "Dst IP", "Timestamp"):
+        assert col not in combined.columns
     assert result["combined"]["ok"] is True
 
 
-def test_combined_defaults_exclude_metadata():
-    assert config.COMBINED_INCLUDE_METADATA is False
+def test_combined_defaults_carry_the_six_identifiers_but_not_the_rest():
     assert config.COMBINED_USE_SCALED is True
+    assert config.COMBINED_ID_COLUMNS == ["Src IP", "Dst IP", "Src Port",
+                                          "Dst Port", "Protocol", "Timestamp"]
     df = make_merged()
     pp.run_step4(df, overwrite=True, verbose=False)
     combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"],
                            low_memory=False)
-    for col in config.METADATA_COLUMNS:
+
+    for col in config.COMBINED_ID_COLUMNS:
+        assert col in combined.columns, col
+    # the bookkeeping-only metadata stays out of the combined file
+    for col in ("Timestamp_dt", "Source_Capture", "Orig_Row"):
         assert col not in combined.columns, col
 
 
@@ -549,7 +559,7 @@ def test_mismatched_row_counts_fail_instead_of_padding_with_nan():
     features, labels, _e = pp.encode_dataset(features, labels, verbose=False)
 
     with pytest.raises(pp.PreprocessingError) as err:
-        pp.build_combined(features, labels.iloc[:5], verbose=False)
+        pp.build_combined(features, labels.iloc[:5], metadata, verbose=False)
     assert "different row counts" in str(err.value)
     assert "NaN" in str(err.value)
 
@@ -575,7 +585,8 @@ def test_combined_has_no_nan_or_inf():
     result = pp.run_step4(df, overwrite=True, verbose=False)
     combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"],
                            low_memory=False)
-    features = [c for c in combined.columns if c not in pp.LABEL_OUTPUT_COLUMNS]
+    skip = set(pp.LABEL_OUTPUT_COLUMNS) | set(config.COMBINED_ID_COLUMNS)
+    features = [c for c in combined.columns if c not in skip]
     block = combined[features].to_numpy(dtype="float64")
     assert int(np.isnan(block).sum()) == 0
     assert int(np.isinf(block).sum()) == 0
@@ -594,3 +605,132 @@ def test_other_step4_files_are_unchanged_by_the_combined_file():
 
     for name, content in before.items():
         assert (folder / name).read_bytes() == content, name
+
+
+# ===========================================================================
+# 12. the flow identifier columns in preprocessing.csv
+# ===========================================================================
+def test_identifier_values_are_raw_and_aligned_to_the_right_rows():
+    """Joined by row position, so row i is still the same flow."""
+    df = make_merged()
+    result = pp.run_step4(df, overwrite=True, verbose=False)
+    combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"],
+                           low_memory=False)
+
+    # the ORIGINAL values from the merged data, unchanged
+    assert combined["Src IP"].tolist() == df["Src IP"].tolist()
+    assert combined["Dst IP"].tolist() == df["Dst IP"].tolist()
+    assert combined["Src Port"].tolist() == df["Src Port"].tolist()
+    assert combined["Dst Port"].tolist() == df["Dst Port"].tolist()
+    assert combined["Protocol"].tolist() == df["Protocol"].tolist()
+    assert combined["Timestamp"].tolist() == df["Timestamp"].tolist()
+    # and row i still lines up with the label and the metadata
+    assert combined["Label"].tolist() == df[config.LABEL_COLUMN].tolist()
+    assert combined["Src IP"].tolist() == result["metadata"]["Src IP"].tolist()
+
+
+def test_identifier_values_are_not_scaled():
+    df = make_merged()
+    pp.run_step4(df, overwrite=True, verbose=False)
+    combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"],
+                           low_memory=False)
+
+    assert combined["Src Port"].max() > 1, "ports must be raw, not scaled into [0,1]"
+    assert combined["Protocol"].isin([1, 2, 6, 17]).all(), "raw protocol numbers"
+    assert combined["Src IP"].iloc[0].count(".") == 3, "IP strings unchanged"
+
+
+def test_ports_and_protocol_are_integers():
+    df = make_merged()
+    pp.run_step4(df, overwrite=True, verbose=False)
+    combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"],
+                           low_memory=False)
+    for col in config.COMBINED_INT_COLUMNS:
+        assert pd.api.types.is_integer_dtype(combined[col]), "%s is %s" % (col, combined[col].dtype)
+    assert combined[list(config.COMBINED_ID_COLUMNS)].isna().to_numpy().sum() == 0
+
+
+def test_the_one_hot_protocol_columns_are_still_there():
+    """Adding raw Protocol must not remove the one-hot columns."""
+    df = make_merged()
+    pp.run_step4(df, overwrite=True, verbose=False)
+    combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"],
+                           low_memory=False)
+
+    for col in ("Protocol_ICMP", "Protocol_TCP", "Protocol_UDP", "Protocol_other"):
+        assert col in combined.columns, col
+    assert "Protocol" in combined.columns          # the raw one too
+    four = combined[["Protocol_ICMP", "Protocol_TCP", "Protocol_UDP", "Protocol_other"]]
+    assert set(four.sum(axis=1)) == {1}
+    # and they agree with the raw number
+    assert (combined.loc[combined["Protocol"] == 6, "Protocol_TCP"] == 1).all()
+    assert (combined.loc[combined["Protocol"] == 2, "Protocol_other"] == 1).all()
+
+
+def test_metadata_csv_now_holds_every_identifier():
+    df = make_merged()
+    pp.run_step4(df, overwrite=True, verbose=False)
+    metadata = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["metadata"],
+                           low_memory=False)
+    for col in config.COMBINED_ID_COLUMNS:
+        assert col in metadata.columns, col
+    assert metadata["Protocol"].tolist() == df["Protocol"].tolist()
+
+
+def test_identifiers_are_not_in_feature_list_json():
+    import json
+    df = make_merged()
+    pp.run_step4(df, overwrite=True, verbose=False)
+    listed = json.loads(
+        (config.STEP4_OUTPUT_DIR / config.STEP4_FILES["feature_list"])
+        .read_text(encoding="utf-8"))["features"]
+
+    for col in config.ID_COLUMNS_NOT_FOR_TRAINING:
+        assert col not in listed, "%s must never be a model feature" % col
+    assert "Protocol_TCP" in listed       # the one-hot IS a feature
+
+
+def test_get_feature_matrix_excludes_identifiers_and_labels():
+    df = make_merged()
+    result = pp.run_step4(df, overwrite=True, verbose=False)
+    combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"],
+                           low_memory=False)
+
+    X = pp.get_feature_matrix(combined)
+
+    assert list(X.columns) == list(result["features_scaled"].columns)
+    assert len(X) == len(combined)
+    for col in config.ID_COLUMNS_NOT_FOR_TRAINING:
+        assert col not in X.columns, col
+    for col in pp.LABEL_OUTPUT_COLUMNS:
+        assert col not in X.columns, col
+    # it is numeric all the way through, ready for a model
+    assert X.to_numpy(dtype="float64").shape == (len(combined), X.shape[1])
+
+
+def test_get_feature_matrix_accepts_an_explicit_list():
+    df = make_merged()
+    pp.run_step4(df, overwrite=True, verbose=False)
+    combined = pd.read_csv(config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"],
+                           low_memory=False)
+
+    X = pp.get_feature_matrix(combined, feature_list=["Flow Duration", "Protocol_TCP"])
+    assert list(X.columns) == ["Flow Duration", "Protocol_TCP"]
+
+    with pytest.raises(pp.PreprocessingError):
+        pp.get_feature_matrix(combined, feature_list=["not a column"])
+
+
+def test_build_from_saved_also_carries_the_identifiers():
+    df = make_merged()
+    pp.run_step4(df, overwrite=True, verbose=False)
+    path = config.STEP4_OUTPUT_DIR / config.STEP4_FILES["combined"]
+    from_run = pd.read_csv(path, low_memory=False)
+
+    path.unlink()
+    rebuilt = pp.build_combined_from_saved(verbose=False)
+
+    assert rebuilt["ok"] is True
+    from_saved = pd.read_csv(path, low_memory=False)
+    assert list(from_saved.columns[:6]) == list(config.COMBINED_ID_COLUMNS)
+    pd.testing.assert_frame_equal(from_run, from_saved)
