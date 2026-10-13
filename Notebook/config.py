@@ -641,9 +641,16 @@ OVERWRITE_STEP4 = False
 # attack-state-graph work in a later step needs them.  Protocol is deliberately
 # NOT here: it IS a feature, and gets one-hot encoded.
 METADATA_COLUMNS = [
-    "Src IP", "Dst IP", "Src Port", "Dst Port",
+    "Src IP", "Dst IP", "Src Port", "Dst Port", "Protocol",
     "Timestamp", "Timestamp_dt", "Source_Capture", "Orig_Row",
 ]
+
+# Columns that appear in BOTH metadata.csv and the feature matrix.
+# Protocol is an identifier AND a feature: metadata.csv keeps the raw number so
+# every identifier lives in one place, while the feature pipeline still one-hot
+# encodes it.  Without this exception, moving Protocol into metadata would strip
+# it from the features and the Protocol_* columns would never be created.
+METADATA_SHARED_COLUMNS = ["Protocol"]
 
 # Labels that count as "not an attack" for the binary target.
 # "Benign" (a non-attacker flow inside an attack capture) and "Normal" (the N-0
@@ -690,7 +697,23 @@ COMBINED_CSV = STEP4_OUTPUT_DIR / "preprocessing.csv"
 #          a later step wants if it will fit its own scaler on a training split
 COMBINED_USE_SCALED = True
 
-# True -> Src IP, Dst IP, the ports, Timestamp, Source_Capture and Orig_Row are
-#         added as the FIRST columns.  Off by default: those identifiers are
-#         label leakage if they reach a model, and metadata.csv already has them.
-COMBINED_INCLUDE_METADATA = False
+# The flow identifiers placed at the FRONT of preprocessing.csv, in this order.
+# They carry their ORIGINAL values from the Step 3 merged data: IP strings as
+# they were, ports and Protocol as integers, Timestamp as the original text.
+# None of them is scaled or one-hot encoded (the Protocol_* one-hot columns are
+# still produced separately and stay in the feature block).
+# Set it to [] for the old layout, features and labels only.
+COMBINED_ID_COLUMNS = ["Src IP", "Dst IP", "Src Port", "Dst Port",
+                       "Protocol", "Timestamp"]
+
+# The same list under the name that says what it is FOR: these columns must
+# never be fed to a model.  The attacker IPs decided the labels back in Step 1,
+# so training on them would be label leakage and would score near-perfectly
+# while learning nothing.  They are in preprocessing.csv so a row can be traced
+# back to its flow, and for the sequence / attack-state-graph work later.
+# preprocessing.get_feature_matrix(df) returns only the feature_list.json
+# columns, which is what a model should actually see.
+ID_COLUMNS_NOT_FOR_TRAINING = COMBINED_ID_COLUMNS
+
+# Port and protocol numbers must stay integers in preprocessing.csv.
+COMBINED_INT_COLUMNS = ["Src Port", "Dst Port", "Protocol"]

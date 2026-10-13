@@ -106,7 +106,12 @@ def split_metadata(df: pd.DataFrame, verbose: bool = True):
 
     metadata = df[meta_cols].copy()
     labels = df[[config.LABEL_COLUMN]].copy()
-    features = df.drop(columns=meta_cols + [config.LABEL_COLUMN]).copy()
+    # Columns in METADATA_SHARED_COLUMNS are COPIED into metadata but stay in the
+    # features: Protocol is an identifier AND the input to the one-hot encoding,
+    # so dropping it here would silently remove the Protocol_* columns.
+    shared = [c for c in config.METADATA_SHARED_COLUMNS if c in meta_cols]
+    drop_cols = [c for c in meta_cols if c not in shared]
+    features = df.drop(columns=drop_cols + [config.LABEL_COLUMN]).copy()
 
     if verbose:
         show_table(kv_table([
@@ -115,9 +120,11 @@ def split_metadata(df: pd.DataFrame, verbose: bool = True):
             ("metadata columns kept aside", len(meta_cols)),
             ("label column", config.LABEL_COLUMN),
             ("feature columns", features.shape[1]),
-        ]), note="Metadata columns: %s%s" % (
+        ]), note="Metadata columns: %s%s%s" % (
             ", ".join(meta_cols),
-            "" if not missing else "  (not present: %s)" % ", ".join(missing)))
+            "" if not missing else "  (not present: %s)" % ", ".join(missing),
+            ("  -- %s is also kept as a feature, for the one-hot encoding"
+             % ", ".join(shared)) if shared else ""))
     return features, labels, metadata
 
 
@@ -752,7 +759,7 @@ LABEL_OUTPUT_COLUMNS = ["Label", "Label_encoded", "Label_binary"]
 
 def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
                    metadata: pd.DataFrame | None = None,
-                   include_metadata: bool | None = None,
+                   id_columns: Sequence[str] | None = None,
                    feature_order: Sequence[str] | None = None,
                    verbose: bool = True) -> pd.DataFrame:
     """Join features and labels side by side, in the original row order.
@@ -764,14 +771,20 @@ def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
     Column order: [metadata] + features (feature_order) + Label, Label_encoded,
     Label_binary.
     """
-    include_metadata = (config.COMBINED_INCLUDE_METADATA if include_metadata is None
-                        else include_metadata)
+    id_columns = (list(config.COMBINED_ID_COLUMNS) if id_columns is None
+                  else list(id_columns))
 
     parts = {"features": len(features), "labels": len(labels)}
-    if include_metadata:
+    if id_columns:
         if metadata is None:
             raise PreprocessingError(
-                "COMBINED_INCLUDE_METADATA is True but no metadata frame was given")
+                "COMBINED_ID_COLUMNS asks for %s but no metadata frame was given"
+                % id_columns)
+        absent = [c for c in id_columns if c not in metadata.columns]
+        if absent:
+            raise PreprocessingError(
+                "the metadata frame has no %s, so those identifier columns cannot be "
+                "added to preprocessing.csv" % absent)
         parts["metadata"] = len(metadata)
     if len(set(parts.values())) != 1:
         raise PreprocessingError(
@@ -791,8 +804,13 @@ def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
     # reset_index so the join is POSITIONAL: row i of each part is the same flow,
     # and a stray index would otherwise realign the rows silently.
     pieces = []
-    if include_metadata:
-        pieces.append(metadata.reset_index(drop=True))
+    if id_columns:
+        ids = metadata[id_columns].reset_index(drop=True).copy()
+        # ports and Protocol stay integers, never floats or scaled values
+        for col in config.COMBINED_INT_COLUMNS:
+            if col in ids.columns:
+                ids[col] = ids[col].astype("int64")
+        pieces.append(ids)
     pieces.append(features[order].reset_index(drop=True))
     pieces.append(labels[LABEL_OUTPUT_COLUMNS].reset_index(drop=True))
 
@@ -801,23 +819,24 @@ def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
     if verbose:
         show_table(kv_table([
             ("rows", f"{len(combined):,}"),
-            ("metadata columns", len(metadata.columns) if include_metadata else 0),
+            ("identifier columns", len(id_columns)),
             ("feature columns", len(order)),
             ("label columns", len(LABEL_OUTPUT_COLUMNS)),
             ("total columns", combined.shape[1]),
-        ]), note="Built by column-joining the frames Step 4 already produced -- "
-                 "nothing recomputed, nothing re-scaled.")
+        ]), note="Built by column-joining the frames Step 4 already produced -- nothing "
+                 "recomputed, nothing re-scaled. The identifiers keep their ORIGINAL "
+                 "values and are joined by row POSITION, never by merging on values.")
     return combined
 
 
 def verify_combined(combined: pd.DataFrame, features: pd.DataFrame,
                     labels: pd.DataFrame, metadata: pd.DataFrame | None = None,
                     expected_rows: int | None = None,
-                    include_metadata: bool | None = None,
+                    id_columns: Sequence[str] | None = None,
                     path: Path | None = None, verbose: bool = True):
     """Re-read the combined file and check it against its parts.  [OK]/[FAIL]."""
-    include_metadata = (config.COMBINED_INCLUDE_METADATA if include_metadata is None
-                        else include_metadata)
+    id_columns = (list(config.COMBINED_ID_COLUMNS) if id_columns is None
+                  else list(id_columns))
     path = Path(path) if path is not None else config.COMBINED_CSV
     checks: list[dict[str, Any]] = []
 
@@ -842,14 +861,37 @@ def verify_combined(combined: pd.DataFrame, features: pd.DataFrame,
     add("rows match the other Step 4 files", len(on_disk) == rows_expected,
         "%s on disk vs %s expected" % (f"{len(on_disk):,}", f"{rows_expected:,}"))
 
-    n_meta = len(metadata.columns) if (include_metadata and metadata is not None) else 0
-    cols_expected = n_meta + len(features.columns) + len(LABEL_OUTPUT_COLUMNS)
-    add("columns == %sfeatures + 3 label columns"
-        % ("metadata + " if include_metadata else ""),
+    n_ids = len(id_columns)
+    cols_expected = n_ids + len(features.columns) + len(LABEL_OUTPUT_COLUMNS)
+    add("columns == %d identifiers + %d features + 3 labels"
+        % (n_ids, len(features.columns)),
         on_disk.shape[1] == cols_expected,
-        "%d on disk vs %d expected (%d features + 3%s)"
-        % (on_disk.shape[1], cols_expected, len(features.columns),
-           " + %d metadata" % n_meta if n_meta else ""))
+        "%d on disk vs %d expected" % (on_disk.shape[1], cols_expected))
+
+    if id_columns:
+        add("the first %d columns are the identifiers, in order" % n_ids,
+            list(on_disk.columns[:n_ids]) == id_columns,
+            "got %s" % list(on_disk.columns[:n_ids]))
+        if metadata is not None and len(on_disk) == len(metadata):
+            same_ids = all(
+                on_disk[c].astype(str).tolist() == metadata[c].astype(str).tolist()
+                for c in id_columns if c in metadata.columns)
+            add("identifier values match metadata.csv row by row", same_ids,
+                "%d columns over %s rows" % (n_ids, f"{len(on_disk):,}"))
+        else:
+            add("identifier values match metadata.csv row by row", False,
+                "no metadata frame, or the row counts differ")
+        int_ok = all(pd.api.types.is_integer_dtype(on_disk[c])
+                     for c in config.COMBINED_INT_COLUMNS if c in on_disk.columns)
+        add("ports and Protocol are integers", int_ok,
+            ", ".join("%s=%s" % (c, on_disk[c].dtype)
+                      for c in config.COMBINED_INT_COLUMNS if c in on_disk.columns))
+        id_nan = int(on_disk[[c for c in id_columns if c in on_disk.columns]]
+                     .isna().to_numpy().sum())
+        add("no NaN in the identifier columns", id_nan == 0, "%d NaN cells" % id_nan)
+        add("identifiers are NOT in feature_list.json",
+            not set(id_columns) & set(features.columns),
+            "they are excluded from the model features")
 
     feature_cols = [c for c in features.columns if c in on_disk.columns]
     block = on_disk[feature_cols].to_numpy(dtype="float64")
@@ -891,7 +933,7 @@ def verify_combined(combined: pd.DataFrame, features: pd.DataFrame,
 def save_combined(features: pd.DataFrame, labels: pd.DataFrame,
                   metadata: pd.DataFrame | None = None,
                   use_scaled: bool | None = None,
-                  include_metadata: bool | None = None,
+                  id_columns: Sequence[str] | None = None,
                   feature_order: Sequence[str] | None = None,
                   verbose: bool = True) -> dict[str, Any]:
     """Write preprocessing.csv and verify it from disk."""
@@ -907,16 +949,14 @@ def save_combined(features: pd.DataFrame, labels: pd.DataFrame,
     if verbose:
         show_title("4.4  Final preprocessed dataset (preprocessing.csv)")
 
-    combined = build_combined(features, labels, metadata,
-                              include_metadata=include_metadata,
+    combined = build_combined(features, labels, metadata, id_columns=id_columns,
                               feature_order=feature_order, verbose=verbose)
     path = folder / config.STEP4_FILES["combined"]
     combined.to_csv(path, index=False)
 
     table, ok, on_disk = verify_combined(
-        combined, features, labels, metadata,
-        expected_rows=len(features), include_metadata=include_metadata,
-        path=path, verbose=verbose)
+        combined, features, labels, metadata, expected_rows=len(features),
+        id_columns=id_columns, path=path, verbose=verbose)
 
     out.update({"status": "written", "ok": ok, "combined": combined,
                 "on_disk": on_disk, "verification": table,
@@ -927,6 +967,9 @@ def save_combined(features: pd.DataFrame, labels: pd.DataFrame,
                              ("size (MB)", out["size_mb"]),
                              ("rows", f"{out['rows']:,}"),
                              ("columns", out["columns"]),
+                             ("identifier columns",
+                              ", ".join(id_columns if id_columns is not None
+                                        else config.COMBINED_ID_COLUMNS) or "(none)"),
                              ("features from", "features_scaled" if out["use_scaled"]
                               else "features_clean"),
                              ("result", "[OK] written and verified" if ok
@@ -952,7 +995,7 @@ def build_combined_from_saved(verbose: bool = True) -> dict[str, Any]:
     features = pd.read_csv(folder / features_name, low_memory=False)
     labels = pd.read_csv(folder / names["labels"], low_memory=False)
     metadata = None
-    if config.COMBINED_INCLUDE_METADATA:
+    if config.COMBINED_ID_COLUMNS:
         metadata = pd.read_csv(folder / names["metadata"], low_memory=False)
 
     order = None
@@ -963,3 +1006,39 @@ def build_combined_from_saved(verbose: bool = True) -> dict[str, Any]:
 
     return save_combined(features, labels, metadata, use_scaled=use_scaled,
                          feature_order=order, verbose=verbose)
+
+
+def get_feature_matrix(df: pd.DataFrame,
+                       feature_list: Sequence[str] | None = None) -> pd.DataFrame:
+    """Only the model features: no identifiers, no labels.
+
+    preprocessing.csv deliberately carries Src IP, Dst IP, the ports, Protocol
+    and Timestamp so a row can be traced back to its flow and so the sequence /
+    attack-state-graph work has what it needs.  They must NEVER be fed to a
+    model: the attacker IPs decided the labels in Step 1, so training on them is
+    label leakage and would score near-perfectly while learning nothing.
+
+    Use this to get what a model should actually see:
+
+        import pandas as pd
+        from src.mscad import preprocessing
+        df = pd.read_csv(config.COMBINED_CSV)
+        X = preprocessing.get_feature_matrix(df)
+        y = df["Label_encoded"]
+    """
+    if feature_list is None:
+        folder = config.usable_output_dir(config.STEP4_OUTPUT_DIR)
+        path = (folder / config.STEP4_FILES["feature_list"]) if folder else None
+        if path is not None and path.exists():
+            feature_list = json.loads(path.read_text(encoding="utf-8"))["features"]
+        else:
+            # fall back to "everything that is not an identifier or a label"
+            excluded = set(config.ID_COLUMNS_NOT_FOR_TRAINING) | set(LABEL_OUTPUT_COLUMNS)
+            excluded |= set(config.METADATA_COLUMNS)
+            feature_list = [c for c in df.columns if c not in excluded]
+
+    missing = [c for c in feature_list if c not in df.columns]
+    if missing:
+        raise PreprocessingError(
+            "these feature_list columns are not in the frame: %s" % missing)
+    return df[list(feature_list)]
