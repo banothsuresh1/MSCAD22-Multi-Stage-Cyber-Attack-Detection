@@ -413,7 +413,8 @@ def test_step4_does_not_split_or_resample():
 # ===========================================================================
 # 10. path safety
 # ===========================================================================
-def test_step4_refuses_a_windows_path_off_windows(tmp_path, monkeypatch, capsys):
+def test_step4_refuses_a_windows_path_off_windows(tmp_path, monkeypatch, capsys,
+                                                  assert_no_leaked_output):
     monkeypatch.setattr(config, "STEP4_OUTPUT_DIR", Path(r"C:\MSCAD2022\outputs\step4"))
     monkeypatch.setattr(config.os, "name", "posix")
     monkeypatch.chdir(tmp_path)
@@ -423,7 +424,7 @@ def test_step4_refuses_a_windows_path_off_windows(tmp_path, monkeypatch, capsys)
     capsys.readouterr()
 
     assert result["saved"]["status"] == "skipped_not_windows"
-    assert list(tmp_path.iterdir()) == [], "no 'C:\\\\MSCAD2022' folder may be created"
+    assert_no_leaked_output("run_step4")
 
 
 def test_step4_output_dir_is_under_data_root_not_the_repo():

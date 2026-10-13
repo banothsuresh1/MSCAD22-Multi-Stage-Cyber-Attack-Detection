@@ -445,7 +445,8 @@ def test_step5_does_no_resampling_or_class_weighting():
 # ===========================================================================
 # 6. the Windows-path guard
 # ===========================================================================
-def test_step5_refuses_a_windows_path_off_windows(tmp_path, monkeypatch, capsys):
+def test_step5_refuses_a_windows_path_off_windows(tmp_path, monkeypatch, capsys,
+                                                  assert_no_leaked_output):
     """On Linux, Path(r"C:\\...") is RELATIVE -- nothing may be created."""
     monkeypatch.setattr(config, "STEP5_OUTPUT_DIR", config.Path(r"C:\MSCAD2022\outputs\step5"))
     monkeypatch.setattr(config, "running_on_windows", lambda: False)
@@ -455,8 +456,7 @@ def test_step5_refuses_a_windows_path_off_windows(tmp_path, monkeypatch, capsys)
 
     assert folder is None
     assert "[SKIP]" in capsys.readouterr().out
-    assert not (tmp_path / "C:").exists(), "a 'C:' folder must never be created"
-    assert list(tmp_path.iterdir()) == []
+    assert_no_leaked_output("prepare_output_dir for the Step 5 folder")
 
 
 def test_step5_output_dir_is_under_data_root_not_the_repo():
