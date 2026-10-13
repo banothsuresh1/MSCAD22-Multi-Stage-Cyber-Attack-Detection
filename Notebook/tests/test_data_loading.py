@@ -19,6 +19,14 @@ import config
 from src.mscad import data_loading as dl
 
 
+# The real configured paths, captured at import time -- the autouse fixture
+# below redirects config to tmp_path for every test, so anything asserting on
+# the genuine configuration has to read it from here.
+REAL_PATHS = {name: getattr(config, name) for name in
+              ("CSV_INPUT_DIR", "OUTPUTS_DIR", "STEP2_OUTPUT_DIR",
+               "STEP3_OUTPUT_DIR", "MERGED_CSV", "MERGED_PARQUET",
+               "PROJECT_ROOT", "DATA_ROOT")}
+
 # ===========================================================================
 # helpers
 # ===========================================================================
@@ -59,6 +67,21 @@ def redirect_outputs(monkeypatch, root: Path) -> Path:
     monkeypatch.setattr(config, "MERGED_CSV", step3 / "MSCAD_merged.csv")
     monkeypatch.setattr(config, "MERGED_PARQUET", step3 / "MSCAD_merged.parquet")
     return step3
+
+
+@pytest.fixture(autouse=True)
+def _never_write_outside_tmp(tmp_path, monkeypatch):
+    """Every test writes to tmp_path, never to the configured folders.
+
+    Without this, a test that calls a saving function would write to
+    config.STEP3_OUTPUT_DIR -- which on Windows is the user's real
+    C:\\MSCAD2022\\outputs\\step3, and on Linux is a RELATIVE folder named
+    "C:\\MSCAD2022" created inside the repository.  That is exactly how two
+    files with Windows paths once got committed and broke `git pull` on
+    Windows.  A test that wants its own location just calls redirect_outputs()
+    again.
+    """
+    redirect_outputs(monkeypatch, tmp_path / "_autouse_outputs")
 
 
 def six_captures(folder: Path) -> Path:
@@ -921,16 +944,16 @@ def test_step2_and_step3_paths_are_not_under_project_root():
     """The bug that lost the merged file: outputs hanging off the code folder."""
     for name in ("CSV_INPUT_DIR", "OUTPUTS_DIR", "STEP2_OUTPUT_DIR",
                  "STEP3_OUTPUT_DIR", "MERGED_CSV", "MERGED_PARQUET"):
-        value = str(getattr(config, name))
-        assert str(config.PROJECT_ROOT) not in value, (
+        value = str(REAL_PATHS[name])
+        assert str(REAL_PATHS["PROJECT_ROOT"]) not in value, (
             "%s is under PROJECT_ROOT, so a second copy of the code would move it" % name)
-        assert str(config.DATA_ROOT) in value, "%s should hang off DATA_ROOT" % name
+        assert str(REAL_PATHS["DATA_ROOT"]) in value, "%s should hang off DATA_ROOT" % name
 
 
 def test_merged_csv_sits_in_step3_output_dir():
-    assert config.MERGED_CSV.parent == config.STEP3_OUTPUT_DIR
-    assert config.MERGED_CSV.name == "MSCAD_merged.csv"
-    assert config.STEP3_OUTPUT_DIR == config.OUTPUTS_DIR / "step3"
+    assert REAL_PATHS["MERGED_CSV"].parent == REAL_PATHS["STEP3_OUTPUT_DIR"]
+    assert REAL_PATHS["MERGED_CSV"].name == "MSCAD_merged.csv"
+    assert REAL_PATHS["STEP3_OUTPUT_DIR"] == REAL_PATHS["OUTPUTS_DIR"] / "step3"
 
 
 def test_keeping_an_existing_file_is_not_reported_as_a_failure(tmp_path, monkeypatch, capsys):
@@ -968,3 +991,170 @@ def test_keeping_an_identical_file_reports_a_clean_match(tmp_path, monkeypatch, 
     assert result["status"] == "kept_existing"
     assert result["ok"] is True and result["stale"] is False
     assert "matches what was just built" in printed
+
+
+# ===========================================================================
+# 16. no RuntimeWarnings anywhere in the Step 3 inspection
+# ===========================================================================
+def test_whole_overview_emits_no_runtime_warning_on_inf(tmp_path, monkeypatch, capsys):
+    """Not just describe(): the entire summarize_dataset run must be quiet.
+
+    The warnings came from pandas computing mean/std/quantiles over columns
+    holding inf. This runs every section with RuntimeWarning promoted to an
+    error, so a new one anywhere would fail the test.
+    """
+    import warnings
+
+    redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    six_captures(folder)
+    frames, _r, _f = dl.acquire_captures(folder, verbose=False)
+    merged, _ = dl.merge_flow_csvs(frames=frames, verbose=False)
+    # inf in all three rate columns, as the real zero-duration flows produce
+    for col in ("Flow Byts/s", "Flow Pkts/s", "Fwd Pkts/s"):
+        merged.loc[merged.index[:4], col] = np.inf
+    merged.loc[merged.index[2], "Pkt Len Mean"] = np.nan
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        out = dl.summarize_dataset(merged, make_plot=True, compare_kaggle=False)
+    capsys.readouterr()
+
+    assert out["describe"].loc["Flow Byts/s", "inf_count"] == 4
+    assert out["inf_total"] == 12
+
+
+def test_describe_table_has_the_local_warning_guard():
+    """The safety net must be local -- never a global warning filter."""
+    import inspect
+    src = inspect.getsource(dl.describe_table)
+    assert "np.errstate(invalid=\"ignore\"" in src
+    assert "warnings.catch_warnings()" in src
+    assert "warnings.simplefilter" not in src, "must not change warnings globally"
+
+
+def test_inf_survives_the_overview_and_the_saved_csv(tmp_path, monkeypatch):
+    """Statistics are computed on a copy; the data and the CSV keep their inf."""
+    step3 = redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    six_captures(folder)
+    frames, _r, _f = dl.acquire_captures(folder, verbose=False)
+    merged, _ = dl.merge_flow_csvs(frames=frames, verbose=False)
+    merged.loc[merged.index[:3], "Flow Byts/s"] = np.inf
+    merged.loc[merged.index[0], "Flow Pkts/s"] = -np.inf
+
+    dl.save_merged(merged, overwrite=True, verbose=False)
+    dl.summarize_dataset(merged, make_plot=False, compare_kaggle=False)
+
+    # in memory
+    assert int(np.isinf(merged["Flow Byts/s"].to_numpy()).sum()) == 3
+    assert np.isneginf(merged["Flow Pkts/s"].iloc[0])
+    # and on disk
+    on_disk = pd.read_csv(step3 / "MSCAD_merged.csv", low_memory=False)
+    assert int(np.isinf(on_disk["Flow Byts/s"].to_numpy()).sum()) == 3
+    assert np.isneginf(on_disk["Flow Pkts/s"].iloc[0])
+
+
+def test_kaggle_comparison_table_is_saved_to_step3(tmp_path, monkeypatch):
+    step3 = redirect_outputs(monkeypatch, tmp_path / "out")
+    kaggle = tmp_path / "kaggle"
+    write_kaggle(kaggle, "MSCAD.csv", {"Normal": 20, "Port Scan": 5, "Infiltration": 2})
+    df = pd.DataFrame({config.LABEL_COLUMN: ["Normal"] * 23 + ["Port_Scan"] * 4})
+
+    result = dl.compare_labels_with_kaggle(df, folder=kaggle, verbose=False)
+
+    comparison = step3 / "kaggle_label_comparison.csv"
+    one_sided = step3 / "kaggle_labels_one_sided.csv"
+    assert comparison.exists() and one_sided.exists()
+    assert result["saved"]["comparison"] == str(comparison)
+
+    saved = pd.read_csv(comparison).set_index("Label")
+    assert saved.loc["Normal", "ours"] == 23 and saved.loc["Normal", "kaggle"] == 20
+    assert saved.loc["Normal", "difference"] == 3
+    assert saved.loc["TOTAL (matched)", "ours"] == 27
+    assert pd.read_csv(one_sided).set_index("Label").loc["Infiltration", "side"] == "Kaggle only"
+
+
+def test_chart_is_written_to_step3(tmp_path, monkeypatch):
+    step3 = redirect_outputs(monkeypatch, tmp_path / "out")
+    df = pd.DataFrame({config.LABEL_COLUMN: ["Normal"] * 10 + ["Port_Scan"] * 3})
+    path = dl.plot_label_counts(df, verbose=False)
+    if path is not None:                       # skipped when matplotlib is absent
+        assert Path(path).parent == step3
+        assert Path(path).name == "label_counts.png"
+
+
+# ===========================================================================
+# 17. cross-platform path safety (the "invalid path" incident)
+# ===========================================================================
+def test_is_windows_absolute_detects_drive_letters_on_any_os():
+    assert config.is_windows_absolute(r"C:\MSCAD2022") is True
+    assert config.is_windows_absolute(r"C:\MSCAD2022\outputs\step3") is True
+    assert config.is_windows_absolute(r"\\server\share\data") is True
+    assert config.is_windows_absolute("/tmp/mscad") is False
+    assert config.is_windows_absolute("relative/folder") is False
+
+
+def test_usable_output_dir_refuses_a_windows_path_off_windows(monkeypatch):
+    """The actual root cause: Path(r'C:\\x') is RELATIVE on Linux."""
+    monkeypatch.setattr(config.os, "name", "posix")
+    assert config.usable_output_dir(r"C:\MSCAD2022\outputs") is None
+    assert config.usable_output_dir("/tmp/fine") == Path("/tmp/fine")
+
+    monkeypatch.setattr(config.os, "name", "nt")
+    assert config.usable_output_dir(r"C:\MSCAD2022\outputs") is not None
+
+
+def test_prepare_output_dir_creates_nothing_for_a_windows_path(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(config.os, "name", "posix")
+    monkeypatch.chdir(tmp_path)                      # so any mistake lands here
+
+    folder = dl.prepare_output_dir(r"C:\MSCAD2022\outputs\step3", "the merged dataset")
+    printed = capsys.readouterr().out
+
+    assert folder is None
+    assert "[SKIP]" in printed and "Windows path" in printed
+    assert list(tmp_path.iterdir()) == [], "nothing may be created"
+
+
+def test_save_merged_refuses_rather_than_making_a_junk_folder(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(config, "STEP3_OUTPUT_DIR", Path(r"C:\MSCAD2022\outputs\step3"))
+    monkeypatch.setattr(config, "MERGED_CSV",
+                        Path(r"C:\MSCAD2022\outputs\step3\MSCAD_merged.csv"))
+    monkeypatch.setattr(config.os, "name", "posix")
+    monkeypatch.chdir(tmp_path)
+
+    result = dl.save_merged(fake_flow_frame(3), verbose=True)
+    capsys.readouterr()
+
+    assert result["status"] == "skipped_not_windows"
+    assert result["ok"] is False
+    assert list(tmp_path.iterdir()) == [], "no 'C:\\\\MSCAD2022' folder may appear"
+
+
+def test_every_writing_helper_is_guarded(tmp_path, monkeypatch, capsys):
+    """plot, step 3 reports and the Kaggle comparison all skip, none create."""
+    monkeypatch.setattr(config, "STEP3_OUTPUT_DIR", Path(r"C:\MSCAD2022\outputs\step3"))
+    monkeypatch.setattr(config.os, "name", "posix")
+    monkeypatch.chdir(tmp_path)
+    df = pd.DataFrame({config.LABEL_COLUMN: ["Normal"] * 5})
+
+    assert dl.plot_label_counts(df, verbose=False) is None
+    assert dl.save_step3_reports(fake_flow_frame(2).assign(
+        **{"Source_Capture": "N-0", "Timestamp_dt": pd.Timestamp("2020-01-01")}),
+        verbose=False) == {}
+    capsys.readouterr()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_no_tracked_file_has_a_windows_path_or_backslash():
+    """Guards the branch against another 'invalid path' on git pull."""
+    import subprocess
+    repo = Path(config.PROJECT_ROOT).parent
+    listing = subprocess.run(["git", "ls-files"], cwd=repo,
+                             capture_output=True, text=True)
+    if listing.returncode != 0:
+        pytest.skip("not a git checkout")
+    bad = [line for line in listing.stdout.splitlines()
+           if "C:" in line or "\\" in line]
+    assert bad == [], "these paths break git checkout on Windows: %s" % bad
