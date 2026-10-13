@@ -49,6 +49,18 @@ def write_flow_csv(folder: Path, capture: str, **kwargs) -> Path:
     return path
 
 
+def redirect_outputs(monkeypatch, root: Path) -> Path:
+    """Point every Step 2/3 output at a temp folder -- never C:\\MSCAD2022."""
+    step2, step3 = root / "step2", root / "step3"
+    monkeypatch.setattr(config, "OUTPUTS_DIR", root)
+    monkeypatch.setattr(config, "STEP2_OUTPUT_DIR", step2)
+    monkeypatch.setattr(config, "STEP3_OUTPUT_DIR", step3)
+    monkeypatch.setattr(config, "MERGED_DIR", step3)
+    monkeypatch.setattr(config, "MERGED_CSV", step3 / "MSCAD_merged.csv")
+    monkeypatch.setattr(config, "MERGED_PARQUET", step3 / "MSCAD_merged.parquet")
+    return step3
+
+
 def six_captures(folder: Path) -> Path:
     """One small CSV per documented capture, with distinct labels and times."""
     plan = [("N-0", "Normal", 4, 0), ("Scan-1", "Port_Scan", 5, 10),
@@ -286,11 +298,7 @@ def test_inf_and_nan_survive_the_merge_and_the_disk_round_trip(tmp_path, monkeyp
     df.loc[2, "Active Mean"] = np.nan
     df.to_csv(tmp_path / "N-0_flows.csv", index=False)
 
-    merged_dir = tmp_path / "out" / "merged"
-    monkeypatch.setattr(config, "MERGED_DIR", merged_dir)
-    monkeypatch.setattr(config, "MERGED_CSV", merged_dir / "MSCAD_merged.csv")
-    monkeypatch.setattr(config, "MERGED_PARQUET", merged_dir / "MSCAD_merged.parquet")
-    monkeypatch.setattr(config, "STEP2_OUTPUT_DIR", tmp_path / "out" / "step2")
+    redirect_outputs(monkeypatch, tmp_path / "out")
 
     files, _ = dl.find_flow_csvs(tmp_path, verbose=False)
     merged, infos = dl.merge_flow_csvs(files=files, verbose=False)
@@ -442,28 +450,23 @@ def test_original_timestamp_text_is_kept_beside_the_parsed_one(tmp_path):
 # 10. saving
 # ===========================================================================
 def test_save_skips_an_existing_file_unless_overwrite(tmp_path, monkeypatch):
-    merged_dir = tmp_path / "merged"
-    monkeypatch.setattr(config, "MERGED_DIR", merged_dir)
-    monkeypatch.setattr(config, "MERGED_CSV", merged_dir / "MSCAD_merged.csv")
-    monkeypatch.setattr(config, "MERGED_PARQUET", merged_dir / "MSCAD_merged.parquet")
-    monkeypatch.setattr(config, "STEP2_OUTPUT_DIR", tmp_path / "step2")
+    redirect_outputs(monkeypatch, tmp_path / "out")
 
     six_captures(tmp_path / "csvs")
     files, _ = dl.find_flow_csvs(tmp_path / "csvs", verbose=False)
     merged, infos = dl.merge_flow_csvs(files=files, verbose=False)
 
     first = dl.save_merged(merged, infos=infos, overwrite=True, verbose=False)
-    assert first["csv"].endswith("MSCAD_merged.csv")
+    assert first["status"] == "written"
+    assert first["ok"] is True
 
     second = dl.save_merged(merged, infos=infos, overwrite=False, verbose=False)
-    assert "skipped" in second["csv"]
+    assert second["status"] == "kept_existing"
+    assert second["ok"] is True          # the existing file is still verified
 
 
 def test_merge_report_is_written(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "MERGED_DIR", tmp_path / "merged")
-    monkeypatch.setattr(config, "MERGED_CSV", tmp_path / "merged" / "m.csv")
-    monkeypatch.setattr(config, "MERGED_PARQUET", tmp_path / "merged" / "m.parquet")
-    monkeypatch.setattr(config, "STEP2_OUTPUT_DIR", tmp_path / "step2")
+    redirect_outputs(monkeypatch, tmp_path / "out")
 
     six_captures(tmp_path / "csvs")
     files, _ = dl.find_flow_csvs(tmp_path / "csvs", verbose=False)
@@ -678,3 +681,290 @@ def test_comparison_reports_which_file_it_picked(tmp_path, capsys):
     assert Path(result["info"]["path"]).name == "MSCAD.csv"
     assert "MSCAD.csv" in printed and "zz_other.csv" in printed
     assert result["table"].set_index("Label").loc["Normal", "kaggle"] == 5
+
+
+# ===========================================================================
+# 14. STEP 2 -- data acquisition
+# ===========================================================================
+def test_acquire_loads_every_capture_from_a_folder(tmp_path, monkeypatch):
+    redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    for capture, label, rows in [("N-0", "Normal", 4), ("Scan-1", "Port_Scan", 5),
+                                 ("App-01", "DoS slowloris", 3)]:
+        write_flow_csv(folder, capture, n_rows=rows, label=label)
+
+    frames, report, failures = dl.acquire_captures(folder, verbose=False)
+
+    assert set(frames) == {"N-0", "Scan-1", "App-01"}
+    assert failures == []
+    assert len(report) == 3
+    assert set(report["status"]) == {"loaded"}
+    assert report.set_index("capture").loc["Scan-1", "rows"] == 5
+    assert list(report.columns) == dl.ACQUISITION_FIELDS
+
+
+def test_acquire_tags_source_capture_and_orig_row(tmp_path, monkeypatch):
+    redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    write_flow_csv(folder, "N-0", n_rows=4, label="Normal")
+    write_flow_csv(folder, "W-B-02", n_rows=3, label="Brute_Force")
+
+    frames, _report, _f = dl.acquire_captures(folder, verbose=False)
+
+    assert set(frames["N-0"]["Source_Capture"]) == {"N-0"}
+    assert frames["N-0"]["Orig_Row"].tolist() == [0, 1, 2, 3]
+    assert frames["W-B-02"]["Orig_Row"].tolist() == [0, 1, 2]
+
+
+def test_acquire_reports_rows_columns_size_labels_and_timestamps(tmp_path, monkeypatch):
+    redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    write_flow_csv(folder, "Scan-1", n_rows=5, label="Port_Scan", start_second=10)
+
+    _frames, report, _f = dl.acquire_captures(folder, verbose=False)
+    row = report.iloc[0]
+
+    assert row["file_name"] == "Scan-1_flows.csv"
+    assert row["rows"] == 5
+    # 73 flow columns + Timestamp_dt (added on load) + Source_Capture + Orig_Row
+    assert row["columns"] == 76
+    assert row["size_mb"] >= 0
+    assert '"Port_Scan": 5' in row["label_counts"]
+    assert pd.notna(row["first_timestamp"]) and pd.notna(row["last_timestamp"])
+    assert row["first_timestamp"] <= row["last_timestamp"]
+
+
+def test_acquire_stops_with_a_clear_message_naming_a_missing_folder(tmp_path):
+    missing = tmp_path / "not_there"
+    with pytest.raises(dl.MissingCapturesError) as err:
+        dl.acquire_captures(missing, verbose=False)
+    assert str(missing) in str(err.value)
+    assert "does not exist" in str(err.value)
+
+
+def test_acquire_stops_with_a_clear_message_on_an_empty_folder(tmp_path):
+    empty = tmp_path / "CSVs"
+    empty.mkdir()
+    (empty / "readme.txt").write_text("no csvs here")
+    with pytest.raises(dl.MissingCapturesError) as err:
+        dl.acquire_captures(empty, verbose=False)
+    assert str(empty) in str(err.value)
+    assert "_flows.csv" in str(err.value)
+
+
+def test_acquire_reports_one_bad_file_and_keeps_the_rest(tmp_path, monkeypatch, capsys):
+    redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    write_flow_csv(folder, "N-0", n_rows=4, label="Normal")
+    write_flow_csv(folder, "Scan-1", n_rows=5, label="Port_Scan")
+    # a file with the right name but a broken header
+    fake_flow_frame(3).drop(columns=["Idle Max"]).to_csv(
+        folder / "App-01_flows.csv", index=False)
+
+    frames, report, failures = dl.acquire_captures(folder, verbose=True)
+    capsys.readouterr()
+
+    assert set(frames) == {"N-0", "Scan-1"}, "the good files must still load"
+    assert len(failures) == 1 and failures[0]["file"] == "App-01_flows.csv"
+    assert "Idle Max" in failures[0]["error"]
+    assert report.set_index("capture").loc["App-01", "status"] == "FAILED"
+
+
+def test_acquire_writes_its_report_to_step2_output_dir(tmp_path, monkeypatch):
+    step3 = redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    write_flow_csv(folder, "N-0", n_rows=2, label="Normal")
+
+    dl.acquire_captures(folder, verbose=False)
+
+    written = config.STEP2_OUTPUT_DIR / "acquisition_report.csv"
+    assert written.exists()
+    assert pd.read_csv(written).iloc[0]["capture"] == "N-0"
+    assert step3.parent == config.OUTPUTS_DIR
+
+
+# ===========================================================================
+# 15. STEP 3 -- column consistency, merging, saving, verifying
+# ===========================================================================
+def test_column_consistency_passes_when_every_capture_matches(tmp_path, monkeypatch):
+    redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    six_captures(folder)
+    frames, _r, _f = dl.acquire_captures(folder, verbose=False)
+
+    table, ok = dl.check_column_consistency(frames, verbose=False)
+
+    assert ok is True
+    assert set(table["status"]) == {"ok"}
+    assert len(table) == 6
+
+
+def test_column_mismatch_is_reported_in_a_table_not_silently_filled(tmp_path):
+    good = fake_flow_frame(3)
+    good["Source_Capture"], good["Orig_Row"] = "N-0", range(3)
+    odd = fake_flow_frame(3).drop(columns=["Idle Max"])
+    odd["Surprise"] = 1
+    odd["Source_Capture"], odd["Orig_Row"] = "Scan-1", range(3)
+
+    table, ok = dl.check_column_consistency({"N-0": good, "Scan-1": odd}, verbose=False)
+
+    assert ok is False
+    row = table.set_index("capture").loc["Scan-1"]
+    assert row["status"] == "MISMATCH"
+    assert "Idle Max" in row["missing_vs_reference"]
+    assert "Surprise" in row["extra_vs_reference"]
+    assert table.set_index("capture").loc["N-0", "status"] == "ok"
+
+
+def test_merged_file_is_actually_written_and_matches_on_disk(tmp_path, monkeypatch):
+    step3 = redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    six_captures(folder)
+    frames, _r, _f = dl.acquire_captures(folder, verbose=False)
+    merged, _ = dl.merge_flow_csvs(frames=frames, verbose=False)
+
+    result = dl.save_merged(merged, overwrite=True, verbose=False)
+
+    target = step3 / "MSCAD_merged.csv"
+    assert target.exists(), "the merged CSV must really be on disk"
+    assert result["status"] == "written"
+    assert result["ok"] is True
+    v = result["verification"]
+    assert v["exists"] is True
+    assert Path(v["path"]).is_absolute()
+    assert v["size_bytes"] > 0
+    assert v["rows_on_disk"] == v["rows_in_memory"] == len(merged)
+    assert v["cols_on_disk"] == v["cols_in_memory"] == merged.shape[1]
+    # and re-reading it independently gives the same shape
+    assert pd.read_csv(target, low_memory=False).shape == merged.shape
+
+
+def test_verify_reports_fail_when_the_file_is_absent(tmp_path, monkeypatch):
+    redirect_outputs(monkeypatch, tmp_path / "out")
+    merged = fake_flow_frame(3)
+    result = dl.verify_merged_file(merged, tmp_path / "nothing.csv", verbose=False)
+    assert result["exists"] is False
+    assert result["ok"] is False
+    assert "does not exist" in result["reason"]
+
+
+def test_overwrite_false_keeps_the_existing_file(tmp_path, monkeypatch):
+    step3 = redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    six_captures(folder)
+    frames, _r, _f = dl.acquire_captures(folder, verbose=False)
+    merged, _ = dl.merge_flow_csvs(frames=frames, verbose=False)
+
+    dl.save_merged(merged, overwrite=True, verbose=False)
+    target = step3 / "MSCAD_merged.csv"
+    stamp = target.stat().st_mtime_ns
+    original = target.read_bytes()
+
+    smaller = merged.iloc[:2]
+    result = dl.save_merged(smaller, overwrite=False, verbose=False)
+
+    assert result["status"] == "kept_existing"
+    assert target.read_bytes() == original, "the existing file must not be rewritten"
+    assert target.stat().st_mtime_ns == stamp
+    # the report still describes the real file, not the smaller frame
+    assert result["verification"]["rows_on_disk"] == len(merged)
+
+
+def test_overwrite_true_replaces_the_file(tmp_path, monkeypatch):
+    step3 = redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    six_captures(folder)
+    frames, _r, _f = dl.acquire_captures(folder, verbose=False)
+    merged, _ = dl.merge_flow_csvs(frames=frames, verbose=False)
+
+    dl.save_merged(merged, overwrite=True, verbose=False)
+    half = merged.iloc[: len(merged) // 2]
+    result = dl.save_merged(half, overwrite=True, verbose=False)
+
+    assert result["status"] == "written"
+    assert result["verification"]["rows_on_disk"] == len(half)
+
+
+def test_save_creates_the_output_folder_if_it_is_missing(tmp_path, monkeypatch):
+    step3 = redirect_outputs(monkeypatch, tmp_path / "deep" / "nested" / "out")
+    assert not step3.exists()
+    folder = tmp_path / "CSVs"
+    six_captures(folder)
+    frames, _r, _f = dl.acquire_captures(folder, verbose=False)
+    merged, _ = dl.merge_flow_csvs(frames=frames, verbose=False)
+
+    result = dl.save_merged(merged, overwrite=True, verbose=False)
+
+    assert step3.is_dir()
+    assert (step3 / "MSCAD_merged.csv").exists()
+    assert result["ok"] is True
+
+
+def test_step3_reports_land_in_step3_output_dir(tmp_path, monkeypatch):
+    step3 = redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    six_captures(folder)
+    frames, _r, _f = dl.acquire_captures(folder, verbose=False)
+    merged, _ = dl.merge_flow_csvs(frames=frames, verbose=False)
+
+    written = dl.save_step3_reports(merged, verbose=False)
+
+    for key in ("label_counts", "crosstab", "summary"):
+        assert Path(written[key]).exists(), key
+        assert Path(written[key]).parent == step3
+    assert "Nothing was cleaned" in Path(written["summary"]).read_text()
+    counts = pd.read_csv(written["label_counts"])
+    assert int(counts["flows"].sum()) == len(merged)
+
+
+def test_step2_and_step3_paths_are_not_under_project_root():
+    """The bug that lost the merged file: outputs hanging off the code folder."""
+    for name in ("CSV_INPUT_DIR", "OUTPUTS_DIR", "STEP2_OUTPUT_DIR",
+                 "STEP3_OUTPUT_DIR", "MERGED_CSV", "MERGED_PARQUET"):
+        value = str(getattr(config, name))
+        assert str(config.PROJECT_ROOT) not in value, (
+            "%s is under PROJECT_ROOT, so a second copy of the code would move it" % name)
+        assert str(config.DATA_ROOT) in value, "%s should hang off DATA_ROOT" % name
+
+
+def test_merged_csv_sits_in_step3_output_dir():
+    assert config.MERGED_CSV.parent == config.STEP3_OUTPUT_DIR
+    assert config.MERGED_CSV.name == "MSCAD_merged.csv"
+    assert config.STEP3_OUTPUT_DIR == config.OUTPUTS_DIR / "step3"
+
+
+def test_keeping_an_existing_file_is_not_reported_as_a_failure(tmp_path, monkeypatch, capsys):
+    """OVERWRITE_MERGED=False is the user's choice, not a verification failure."""
+    step3 = redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    six_captures(folder)
+    frames, _r, _f = dl.acquire_captures(folder, verbose=False)
+    merged, _ = dl.merge_flow_csvs(frames=frames, verbose=False)
+    dl.save_merged(merged, overwrite=True, verbose=False)
+
+    # a DIFFERENT frame, with the file kept
+    result = dl.save_merged(merged.iloc[:3], overwrite=False, verbose=True)
+    printed = capsys.readouterr().out
+
+    assert result["status"] == "kept_existing"
+    assert result["ok"] is True, "a kept file that is readable is not a failure"
+    assert result["stale"] is True, "but the difference must be flagged"
+    assert "[FAIL]" not in printed
+    assert "DIFFERS from what was just built" in printed
+    assert "OVERWRITE_MERGED" in printed
+
+
+def test_keeping_an_identical_file_reports_a_clean_match(tmp_path, monkeypatch, capsys):
+    redirect_outputs(monkeypatch, tmp_path / "out")
+    folder = tmp_path / "CSVs"
+    six_captures(folder)
+    frames, _r, _f = dl.acquire_captures(folder, verbose=False)
+    merged, _ = dl.merge_flow_csvs(frames=frames, verbose=False)
+    dl.save_merged(merged, overwrite=True, verbose=False)
+
+    result = dl.save_merged(merged, overwrite=False, verbose=True)
+    printed = capsys.readouterr().out
+
+    assert result["status"] == "kept_existing"
+    assert result["ok"] is True and result["stale"] is False
+    assert "matches what was just built" in printed

@@ -370,6 +370,151 @@ def validate_columns(df: pd.DataFrame, source: str = "<dataframe>",
 
 
 # ===========================================================================
+# STEP 2 -- DATA ACQUISITION
+# ===========================================================================
+ACQUISITION_FIELDS = ["capture", "file_name", "rows", "columns", "size_mb",
+                      "first_timestamp", "last_timestamp", "label_counts",
+                      "nan_cells", "inf_cells", "status", "error"]
+
+
+def acquire_captures(folder: Path | str | None = None, verbose: bool = True,
+                     save_report: bool = True, **load_kwargs):
+    """STEP 2: load one DataFrame per capture CSV, tagged and reported.
+
+    Reads config.CSV_INPUT_DIR (C:\\MSCAD2022\\CSVs) -- an absolute path, never
+    anything relative to the working directory.
+
+    Each frame is tagged exactly as before:
+      Source_Capture -- the file stem
+      Orig_Row       -- the row's position inside its own file
+
+    Stops with one clear message NAMING THE FOLDER when the folder is missing
+    or holds no matching CSVs.  If a single file fails to read, that file is
+    reported and the others still load.
+
+    Returns (frames, report DataFrame, failures).
+    """
+    folder = Path(folder) if folder is not None else config.CSV_INPUT_DIR
+    if not folder.is_dir():
+        raise MissingCapturesError(
+            "Step 2 cannot start: the flow-CSV folder does not exist:\n    %s\n"
+            "Set config.CSV_INPUT_DIR to the folder holding the Step 1 "
+            "'<capture>_flows.csv' files." % folder)
+
+    matches = sorted(folder.glob(config.FLOW_CSV_PATTERN))
+    if not matches:
+        raise MissingCapturesError(
+            "Step 2 cannot start: no files matching %r in:\n    %s\n"
+            "Run Step 1 first, or point config.CSV_INPUT_DIR at the right folder."
+            % (config.FLOW_CSV_PATTERN, folder))
+
+    files, _used = find_flow_csvs(folder, require_all=False, verbose=False)
+
+    frames: dict[str, pd.DataFrame] = {}
+    rows: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+
+    for f in files:
+        row: dict[str, Any] = {k: "" for k in ACQUISITION_FIELDS}
+        row.update({"capture": f.capture, "file_name": f.path.name,
+                    "size_mb": f.size_mb})
+        try:
+            df, info = load_one_csv(f.path, capture=f.capture, verbose=False,
+                                    **load_kwargs)
+            validate_columns(df, source=f.path.name, verbose=False)
+            # tag here, in Step 2, so the per-capture frames already carry it
+            df["Source_Capture"] = f.capture
+            df["Orig_Row"] = np.arange(len(df), dtype="int64")
+            frames[f.capture] = df
+            row.update({
+                "rows": info["rows"], "columns": int(df.shape[1]),
+                "first_timestamp": info["first_timestamp"],
+                "last_timestamp": info["last_timestamp"],
+                "label_counts": json.dumps({str(k): int(v)
+                                            for k, v in info["label_counts"].items()}),
+                "nan_cells": info["nan_cells"], "inf_cells": info["inf_cells"],
+                "status": "loaded",
+            })
+        except Exception as exc:                     # one bad file must not stop the rest
+            row.update({"status": "FAILED", "error": "%s: %s" % (type(exc).__name__, exc)})
+            failures.append({"file": f.path.name, "error": row["error"]})
+        rows.append(row)
+
+    report = pd.DataFrame(rows, columns=ACQUISITION_FIELDS)
+
+    if save_report:
+        config.STEP2_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        report.to_csv(config.STEP2_OUTPUT_DIR / "acquisition_report.csv", index=False)
+
+    if verbose:
+        show_title("Step 2.1 -- files loaded from %s" % folder)
+        show_table(report.drop(columns=["error"] if not failures else []))
+        loaded = sum(1 for r in rows if r["status"] == "loaded")
+        total_rows = sum(int(r["rows"] or 0) for r in rows if r["status"] == "loaded")
+        show_table(kv_table([("folder", str(folder)),
+                             ("files found", len(files)),
+                             ("loaded", loaded),
+                             ("failed", len(failures)),
+                             ("total rows", f"{total_rows:,}")]))
+        if failures:
+            show_note("These files could NOT be read and are excluded from Step 3:")
+            show_table(pd.DataFrame(failures))
+        if save_report:
+            show_note("Report saved to %s"
+                      % (config.STEP2_OUTPUT_DIR / "acquisition_report.csv"))
+
+    if not frames:
+        raise MissingCapturesError(
+            "Step 2 loaded no usable capture at all from:\n    %s" % folder)
+    return frames, report, failures
+
+
+# ===========================================================================
+# STEP 3 -- column consistency across the captures
+# ===========================================================================
+def check_column_consistency(frames: dict[str, pd.DataFrame],
+                             verbose: bool = True) -> tuple[pd.DataFrame, bool]:
+    """Every capture must have the same columns, in the same order.
+
+    Differences are REPORTED in a table rather than silently filled: pandas
+    would happily concatenate mismatched frames and quietly insert NaN, which
+    would look like missing data later instead of like the bug it is.
+
+    Returns (table, all_consistent).
+    """
+    reference_name = next(iter(frames))
+    reference = list(frames[reference_name].columns)
+
+    rows = []
+    for capture, df in frames.items():
+        cols = list(df.columns)
+        missing = [c for c in reference if c not in cols]
+        extra = [c for c in cols if c not in reference]
+        same_order = cols == reference
+        rows.append({
+            "capture": capture, "columns": len(cols),
+            "missing_vs_reference": ", ".join(missing) if missing else "",
+            "extra_vs_reference": ", ".join(extra) if extra else "",
+            "same_order": same_order,
+            "status": "ok" if (not missing and not extra and same_order) else "MISMATCH",
+        })
+    table = pd.DataFrame(rows)
+    consistent = bool((table["status"] == "ok").all())
+
+    if verbose:
+        show_title("Step 3.1 -- column consistency across captures")
+        show_table(table,
+                   note="Reference capture: **%s** (%d columns). A mismatch is reported, "
+                        "never silently filled -- concatenating mismatched frames would "
+                        "insert NaN that looks like missing data."
+                        % (reference_name, len(reference)))
+        if not consistent:
+            show_note("**[FAIL]** the captures do not share one column set -- fix Step 1 "
+                      "before merging.")
+    return table, consistent
+
+
+# ===========================================================================
 # 4. merge
 # ===========================================================================
 def merge_flow_csvs(frames: dict[str, pd.DataFrame] | None = None,
@@ -521,81 +666,156 @@ def check_merge(merged: pd.DataFrame, infos: Sequence[dict[str, Any]],
 # ===========================================================================
 # 6. save
 # ===========================================================================
+def verify_merged_file(merged: pd.DataFrame, path: Path | None = None,
+                       verbose: bool = True, expect_match: bool = True) -> dict[str, Any]:
+    """Prove the merged dataset really is on disk, and say how it compares.
+
+    Checks, in order: the file exists; its absolute path; its size; and its row
+    and column counts RE-READ FROM DISK against the in-memory frame.  Prints
+    [OK] or a clear [FAIL] -- never "saved" without having looked.
+
+    expect_match=False is used when an existing file was deliberately KEPT
+    (OVERWRITE_MERGED is off).  A row-count difference is then the expected
+    consequence of that choice, not a failure, so the file is judged on being
+    readable and non-empty -- but the difference is still reported loudly, so a
+    stale file cannot pass unnoticed.
+    """
+    path = Path(path) if path is not None else config.MERGED_CSV
+    result: dict[str, Any] = {"path": str(path.resolve()) if path.exists() else str(path),
+                              "exists": path.exists()}
+
+    if not path.exists():
+        result.update({"ok": False, "reason": "the file does not exist"})
+        if verbose:
+            show_table(kv_table([("expected path", str(path)),
+                                 ("exists", False),
+                                 ("result", "[FAIL] nothing was written")]))
+        return result
+
+    size = path.stat().st_size
+    on_disk = load_merged(path, verbose=False)
+    result.update({
+        "size_bytes": size,
+        "size_mb": round(size / 1024 / 1024, 2),
+        "rows_in_memory": int(merged.shape[0]), "rows_on_disk": int(on_disk.shape[0]),
+        "cols_in_memory": int(merged.shape[1]), "cols_on_disk": int(on_disk.shape[1]),
+    })
+    rows_ok = result["rows_in_memory"] == result["rows_on_disk"]
+    cols_ok = result["cols_in_memory"] == result["cols_on_disk"]
+    result["matches_memory"] = bool(rows_ok and cols_ok)
+    result["stale"] = bool(not result["matches_memory"] and not expect_match)
+    result["ok"] = (bool(rows_ok and cols_ok and size > 0) if expect_match
+                    else bool(size > 0))
+    result["dataframe"] = on_disk
+
+    if expect_match:
+        verdict = ("[OK] the merged dataset is on disk and matches"
+                   if result["ok"] else "[FAIL] the file on disk does NOT match")
+    elif result["matches_memory"]:
+        verdict = "[OK] the existing file was kept, and it matches what was just built"
+    else:
+        verdict = ("[OK] file is valid, but it DIFFERS from what was just built "
+                   "-- set config.OVERWRITE_MERGED = True to replace it")
+
+    if verbose:
+        show_table(kv_table([
+            ("absolute path", result["path"]),
+            ("exists", True),
+            ("size (MB)", result["size_mb"]),
+            ("rows: in memory -> on disk",
+             "%s -> %s  %s" % (f"{result['rows_in_memory']:,}",
+                               f"{result['rows_on_disk']:,}",
+                               "same" if rows_ok else "DIFFERENT")),
+            ("columns: in memory -> on disk",
+             "%s -> %s  %s" % (result["cols_in_memory"], result["cols_on_disk"],
+                               "same" if cols_ok else "DIFFERENT")),
+            ("result", verdict)]))
+        if result["stale"]:
+            show_note("**The file on disk is NOT the dataset you just built.** It has "
+                      "%s rows; the merge produced %s. Everything downstream will read "
+                      "the file, so set `config.OVERWRITE_MERGED = True` and re-run this "
+                      "cell if Step 1 or Step 2 changed."
+                      % (f"{result['rows_on_disk']:,}", f"{result['rows_in_memory']:,}"))
+    return result
+
+
 def save_merged(merged: pd.DataFrame, checks: Sequence[dict[str, Any]] | None = None,
                 infos: Sequence[dict[str, Any]] | None = None,
                 overwrite: bool | None = None,
                 verbose: bool = True) -> dict[str, Any]:
-    """Write MERGED_CSV, MERGED_PARQUET (if pyarrow is there) and merge_report.csv.
+    """STEP 3: write the merged dataset to config.MERGED_CSV, then VERIFY it.
 
-    An existing file is kept unless config.OVERWRITE_MERGED is True.
+    config.MERGED_CSV is absolute and hangs off DATA_ROOT, so the destination
+    does not depend on where the notebook was started or where the code lives.
+    The folder is created if missing.
+
+    If the file already exists and overwrite is off, it is NOT rewritten: that
+    is said plainly and the existing file is LOADED instead, so the returned
+    report always describes a real file on disk.
     """
     overwrite = config.OVERWRITE_MERGED if overwrite is None else overwrite
-    config.MERGED_DIR.mkdir(parents=True, exist_ok=True)
-    config.STEP2_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out: dict[str, Any] = {}
+    config.STEP3_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out: dict[str, Any] = {"target": str(config.MERGED_CSV),
+                           "folder": str(config.STEP3_OUTPUT_DIR)}
 
-    # --- CSV -------------------------------------------------------------
     if config.MERGED_CSV.exists() and not overwrite:
-        out["csv"] = "skipped (exists, config.OVERWRITE_MERGED is False)"
+        out["status"] = "kept_existing"
         if verbose:
-            print("  [SKIP]  %s already exists; set config.OVERWRITE_MERGED = True to redo it"
-                  % config.MERGED_CSV.name)
+            show_note("`%s` already exists and `config.OVERWRITE_MERGED` is **False**, "
+                      "so it was NOT rewritten -- the existing file is loaded instead. "
+                      "Set `OVERWRITE_MERGED = True` to replace it."
+                      % config.MERGED_CSV)
     else:
         merged.to_csv(config.MERGED_CSV, index=False)
-        out["csv"] = str(config.MERGED_CSV)
+        out["status"] = "written"
         if verbose:
-            print("  [SAVE]  %s  (%.1f MB)"
-                  % (config.MERGED_CSV, config.MERGED_CSV.stat().st_size / 1024 / 1024))
+            show_note("Wrote **%s**" % config.MERGED_CSV)
 
-    # --- Parquet ---------------------------------------------------------
+    # --- Parquet (optional, same folder) ---------------------------------
     try:
         import pyarrow  # noqa: F401
     except ImportError:
         out["parquet"] = "skipped (pyarrow not installed)"
         if verbose:
-            print("  [SKIP]  Parquet: pyarrow is not installed.  To enable it:")
-            print('             "%s" -m pip install pyarrow' % sys.executable)
-            print("          Continuing with the CSV only -- nothing is lost.")
+            show_note("Parquet skipped: pyarrow is not installed "
+                      "(`\"%s\" -m pip install pyarrow`). The CSV is unaffected."
+                      % sys.executable)
     else:
         if config.MERGED_PARQUET.exists() and not overwrite:
-            out["parquet"] = "skipped (exists, config.OVERWRITE_MERGED is False)"
-            if verbose:
-                print("  [SKIP]  %s already exists" % config.MERGED_PARQUET.name)
+            out["parquet"] = "kept existing"
         else:
             merged.to_parquet(config.MERGED_PARQUET, index=False)
             out["parquet"] = str(config.MERGED_PARQUET)
-            if verbose:
-                print("  [SAVE]  %s  (%.1f MB)"
-                      % (config.MERGED_PARQUET,
-                         config.MERGED_PARQUET.stat().st_size / 1024 / 1024))
 
-    # --- merge report ----------------------------------------------------
+    # --- the merge report -------------------------------------------------
     report_rows: list[dict[str, Any]] = []
     for i in (infos or []):
         report_rows.append({
-            "kind": "file", "name": i["capture"], "expected": "",
-            "actual": "", "result": "",
-            "rows": i["rows"], "nan_cells": i["nan_cells"], "inf_cells": i["inf_cells"],
-            "label_counts": json.dumps({str(k): int(v)
-                                        for k, v in i["label_counts"].items()}),
+            "kind": "file", "name": i["capture"], "expected": "", "actual": "",
+            "result": "", "rows": i["rows"], "nan_cells": i["nan_cells"],
+            "inf_cells": i["inf_cells"],
+            "label_counts": json.dumps({str(k): int(v) for k, v in i["label_counts"].items()}),
             "timestamp_format": i["timestamp_format"] or "",
             "first_timestamp": str(i["first_timestamp"]),
             "last_timestamp": str(i["last_timestamp"]),
         })
     for c in (checks or []):
         report_rows.append({
-            "kind": "check", "name": c["check"],
-            "expected": str(c["expected"])[:300], "actual": str(c["actual"])[:300],
-            "result": c["result"], "rows": "", "nan_cells": "", "inf_cells": "",
-            "label_counts": "", "timestamp_format": "",
-            "first_timestamp": "", "last_timestamp": "",
+            "kind": "check", "name": c["check"], "expected": str(c["expected"])[:300],
+            "actual": str(c["actual"])[:300], "result": c["result"], "rows": "",
+            "nan_cells": "", "inf_cells": "", "label_counts": "",
+            "timestamp_format": "", "first_timestamp": "", "last_timestamp": "",
         })
-    report = pd.DataFrame(report_rows)
-    report_path = config.STEP2_OUTPUT_DIR / "merge_report.csv"
-    report.to_csv(report_path, index=False)
+    report_path = config.STEP3_OUTPUT_DIR / "merge_report.csv"
+    pd.DataFrame(report_rows).to_csv(report_path, index=False)
     out["report"] = str(report_path)
-    if verbose:
-        print("  [SAVE]  %s" % report_path)
+
+    # --- and prove it ------------------------------------------------------
+    out["verification"] = verify_merged_file(
+        merged, config.MERGED_CSV, verbose=verbose,
+        expect_match=(out["status"] == "written"))
+    out["stale"] = bool(out["verification"].get("stale"))
+    out["ok"] = bool(out["verification"].get("ok"))
     return out
 
 
@@ -746,7 +966,7 @@ def plot_label_counts(df: pd.DataFrame, path: Path | None = None,
             print('             "%s" -m pip install matplotlib' % sys.executable)
         return None
 
-    path = Path(path) if path is not None else config.STEP2_OUTPUT_DIR / "label_counts.png"
+    path = Path(path) if path is not None else config.STEP3_OUTPUT_DIR / "label_counts.png"
     path.parent.mkdir(parents=True, exist_ok=True)
 
     counts = df[config.LABEL_COLUMN].value_counts().sort_values(ascending=False)
@@ -1091,3 +1311,65 @@ def summarize_dataset(df: pd.DataFrame, make_plot: bool = True,
         out["kaggle_comparison"] = compare_labels_with_kaggle(df)
 
     return out
+
+
+# ===========================================================================
+# STEP 3 -- report files
+# ===========================================================================
+def save_step3_reports(merged: pd.DataFrame, summary: dict[str, Any] | None = None,
+                       verbose: bool = True) -> dict[str, str]:
+    """Write the Step 3 reports beside the merged dataset, in STEP3_OUTPUT_DIR.
+
+    label_counts.csv, source_capture_x_label.csv, label_counts.png and
+    summary.txt -- all under C:\\MSCAD2022\\outputs\\step3, an absolute path.
+    """
+    config.STEP3_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    written: dict[str, str] = {}
+
+    counts = merged[config.LABEL_COLUMN].value_counts()
+    label_tbl = pd.DataFrame({"Label": counts.index.astype(str),
+                              "flows": counts.to_numpy(),
+                              "share_%": (100.0 * counts / len(merged)).round(4).to_numpy()})
+    path = config.STEP3_OUTPUT_DIR / "label_counts.csv"
+    label_tbl.to_csv(path, index=False)
+    written["label_counts"] = str(path)
+
+    crosstab = pd.crosstab(merged["Source_Capture"], merged[config.LABEL_COLUMN],
+                           margins=True)
+    path = config.STEP3_OUTPUT_DIR / "source_capture_x_label.csv"
+    crosstab.to_csv(path)
+    written["crosstab"] = str(path)
+
+    chart = plot_label_counts(merged, verbose=False)
+    if chart is not None:
+        written["chart"] = str(chart)
+
+    feats = [c for c in config.KAGGLE_FEATURES if c in merged.columns]
+    arr = merged[feats].to_numpy(dtype="float64")
+    lines = [
+        "MSCAD Step 3 -- merged dataset summary",
+        "=" * 60,
+        "merged file      : %s" % config.MERGED_CSV,
+        "rows             : %d" % merged.shape[0],
+        "columns          : %d" % merged.shape[1],
+        "captures         : %s" % ", ".join(sorted(merged["Source_Capture"].unique())),
+        "first timestamp  : %s" % merged[TIMESTAMP_DT_COLUMN].min(),
+        "last timestamp   : %s" % merged[TIMESTAMP_DT_COLUMN].max(),
+        "NaN cells (66 features) : %d" % int(np.isnan(arr).sum()),
+        "inf cells (66 features) : %d" % int(np.isinf(arr).sum()),
+        "exact duplicate rows    : %d" % int(merged.duplicated().sum()),
+        "identical-feature rows  : %d" % int(merged.duplicated(subset=feats).sum()),
+        "",
+        "label counts:",
+    ]
+    for label, n in counts.items():
+        lines.append("  %-18s %10d  (%.3f%%)" % (label, n, 100.0 * n / len(merged)))
+    lines += ["", "Nothing was cleaned: inf, NaN and duplicate rows are all kept."]
+    path = config.STEP3_OUTPUT_DIR / "summary.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    written["summary"] = str(path)
+
+    if verbose:
+        show_title("Step 3 report files")
+        show_table(pd.DataFrame({"report": list(written), "path": list(written.values())}))
+    return written
