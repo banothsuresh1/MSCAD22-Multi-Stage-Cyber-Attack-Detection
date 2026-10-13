@@ -54,8 +54,14 @@ RAW_DIR = CSV_OUTPUT_DIR / "raw"          # untouched extractor output
 # REFERENCE ONLY -- the Kaggle MSCAD file.  Read, never written.
 KAGGLE_DIR = DATA_ROOT / "CSV_ORIGINAL"
 
+# Where the Kaggle MSCAD file actually lives.  Step 2's reference comparison
+# uses THIS folder; KAGGLE_DIR above is kept because Step 1 still points at it.
+# Read-only either way: nothing in this project ever writes to them.
+KAGGLE_CSV_DIR = Path(os.environ.get("MSCAD_KAGGLE_CSV_DIR",
+                                     r"C:\MSCAD2022\CSV_Original_kaggle"))
+
 # Code-side folders.
-MERGED_DIR = PROJECT_ROOT / "data" / "merged"      # stays empty in Step 1
+MERGED_DIR = DATA_ROOT / "outputs" / "step3"       # see the Step 2/3 block below
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "step1"    # logs and reports
 SRC_DIR = PROJECT_ROOT / "src"
 TESTS_DIR = PROJECT_ROOT / "tests"
@@ -85,9 +91,22 @@ CSV_CANDIDATE_DIRS = [
     DATA_ROOT / "MSCAD_CSVs",
 ]
 
-MERGED_CSV = MERGED_DIR / "MSCAD_merged.csv"
-MERGED_PARQUET = MERGED_DIR / "MSCAD_merged.parquet"
-STEP2_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "step2"
+# ---------------------------------------------------------------------------
+# STEP 2 (acquisition) and STEP 3 (merging) -- ABSOLUTE paths
+# ---------------------------------------------------------------------------
+# These deliberately hang off DATA_ROOT, not PROJECT_ROOT.  PROJECT_ROOT is
+# wherever config.py happens to sit, so a second copy of the code (a git clone
+# beside C:\MSCAD2022\Notebook, say) silently moved the outputs with it and the
+# merged file appeared to vanish.  Anchoring them to the data drive means the
+# destination is the same no matter where the notebook is started from, and
+# nothing here is ever resolved against the current working directory.
+CSV_INPUT_DIR = CSV_OUTPUT_DIR          # C:\MSCAD2022\CSVs -- Step 2 reads here
+OUTPUTS_DIR = DATA_ROOT / "outputs"     # C:\MSCAD2022\outputs
+STEP2_OUTPUT_DIR = OUTPUTS_DIR / "step2"   # acquisition report
+STEP3_OUTPUT_DIR = OUTPUTS_DIR / "step3"   # merged dataset + its reports
+
+MERGED_CSV = STEP3_OUTPUT_DIR / "MSCAD_merged.csv"
+MERGED_PARQUET = STEP3_OUTPUT_DIR / "MSCAD_merged.parquet"
 
 # The order the captures are concatenated in: the chronological order of the
 # attack scenario, so the merged file reads like the session it came from.
@@ -108,12 +127,14 @@ DIRS_TO_CREATE = [
     TESTS_DIR,
     MERGED_DIR,
     OUTPUT_DIR,
+    OUTPUTS_DIR,
     STEP2_OUTPUT_DIR,
+    STEP3_OUTPUT_DIR,
     NOTEBOOKS_DIR,
 ]
 
 # Folders that must never be written to.
-READ_ONLY_DIRS = [PCAPNG_DIR, KAGGLE_DIR]
+READ_ONLY_DIRS = [PCAPNG_DIR, KAGGLE_DIR, KAGGLE_CSV_DIR]
 
 # ===========================================================================
 # 2. EXTERNAL PROGRAMS
@@ -477,8 +498,13 @@ def all_paths() -> dict:
         "CSV_OUTPUT_DIR (output C/D)": CSV_OUTPUT_DIR,
         "RAW_DIR": RAW_DIR,
         "KAGGLE_DIR (reference)": KAGGLE_DIR,
-        "MERGED_DIR": MERGED_DIR,
-        "OUTPUT_DIR": OUTPUT_DIR,
+        "KAGGLE_CSV_DIR (reference)": KAGGLE_CSV_DIR,
+        "CSV_INPUT_DIR (step 2 reads)": CSV_INPUT_DIR,
+        "MERGED_DIR (= step 3 out)": MERGED_DIR,
+        "MERGED_CSV": MERGED_CSV,
+        "OUTPUT_DIR (step 1)": OUTPUT_DIR,
+        "STEP2_OUTPUT_DIR": STEP2_OUTPUT_DIR,
+        "STEP3_OUTPUT_DIR": STEP3_OUTPUT_DIR,
         "SRC_DIR": SRC_DIR,
         "TESTS_DIR": TESTS_DIR,
         "PYTHON_EXE": Path(PYTHON_EXE),
@@ -504,3 +530,43 @@ def find_kaggle_file() -> Path | None:
             if p.suffix.lower() == ext:
                 return p
     return None
+
+
+def find_kaggle_csv(folder: Path | None = None) -> tuple[Path | None, list[Path]]:
+    """Find the Kaggle MSCAD file in KAGGLE_CSV_DIR.
+
+    Returns (chosen file or None, every candidate found) so the caller can show
+    what was there and say which one it picked -- the choice is never silent.
+
+    Order of preference:
+      1. a .csv whose name starts with "mscad"   (MSCAD.csv, MSCAD_v2.csv, ...)
+      2. any other .csv
+      3. an .xlsx / .xls whose name starts with "mscad"
+      4. any other .xlsx / .xls           (these need openpyxl to read)
+    """
+    base = Path(folder) if folder is not None else KAGGLE_CSV_DIR
+    if not base.is_dir():
+        return None, []
+
+    candidates = sorted(p for p in base.iterdir()
+                        if p.is_file() and p.suffix.lower() in (".csv", ".xlsx", ".xls"))
+    if not candidates:
+        return None, []
+
+    def pick(suffixes, named_mscad):
+        for p in candidates:
+            if p.suffix.lower() not in suffixes:
+                continue
+            if named_mscad and not p.name.lower().startswith("mscad"):
+                continue
+            if not named_mscad and p.name.lower().startswith("mscad"):
+                continue
+            return p
+        return None
+
+    for suffixes, named in (({".csv"}, True), ({".csv"}, False),
+                            ({".xlsx", ".xls"}, True), ({".xlsx", ".xls"}, False)):
+        chosen = pick(suffixes, named)
+        if chosen is not None:
+            return chosen, candidates
+    return candidates[0], candidates

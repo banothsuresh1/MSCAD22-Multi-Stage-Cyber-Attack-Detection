@@ -370,6 +370,151 @@ def validate_columns(df: pd.DataFrame, source: str = "<dataframe>",
 
 
 # ===========================================================================
+# STEP 2 -- DATA ACQUISITION
+# ===========================================================================
+ACQUISITION_FIELDS = ["capture", "file_name", "rows", "columns", "size_mb",
+                      "first_timestamp", "last_timestamp", "label_counts",
+                      "nan_cells", "inf_cells", "status", "error"]
+
+
+def acquire_captures(folder: Path | str | None = None, verbose: bool = True,
+                     save_report: bool = True, **load_kwargs):
+    """STEP 2: load one DataFrame per capture CSV, tagged and reported.
+
+    Reads config.CSV_INPUT_DIR (C:\\MSCAD2022\\CSVs) -- an absolute path, never
+    anything relative to the working directory.
+
+    Each frame is tagged exactly as before:
+      Source_Capture -- the file stem
+      Orig_Row       -- the row's position inside its own file
+
+    Stops with one clear message NAMING THE FOLDER when the folder is missing
+    or holds no matching CSVs.  If a single file fails to read, that file is
+    reported and the others still load.
+
+    Returns (frames, report DataFrame, failures).
+    """
+    folder = Path(folder) if folder is not None else config.CSV_INPUT_DIR
+    if not folder.is_dir():
+        raise MissingCapturesError(
+            "Step 2 cannot start: the flow-CSV folder does not exist:\n    %s\n"
+            "Set config.CSV_INPUT_DIR to the folder holding the Step 1 "
+            "'<capture>_flows.csv' files." % folder)
+
+    matches = sorted(folder.glob(config.FLOW_CSV_PATTERN))
+    if not matches:
+        raise MissingCapturesError(
+            "Step 2 cannot start: no files matching %r in:\n    %s\n"
+            "Run Step 1 first, or point config.CSV_INPUT_DIR at the right folder."
+            % (config.FLOW_CSV_PATTERN, folder))
+
+    files, _used = find_flow_csvs(folder, require_all=False, verbose=False)
+
+    frames: dict[str, pd.DataFrame] = {}
+    rows: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+
+    for f in files:
+        row: dict[str, Any] = {k: "" for k in ACQUISITION_FIELDS}
+        row.update({"capture": f.capture, "file_name": f.path.name,
+                    "size_mb": f.size_mb})
+        try:
+            df, info = load_one_csv(f.path, capture=f.capture, verbose=False,
+                                    **load_kwargs)
+            validate_columns(df, source=f.path.name, verbose=False)
+            # tag here, in Step 2, so the per-capture frames already carry it
+            df["Source_Capture"] = f.capture
+            df["Orig_Row"] = np.arange(len(df), dtype="int64")
+            frames[f.capture] = df
+            row.update({
+                "rows": info["rows"], "columns": int(df.shape[1]),
+                "first_timestamp": info["first_timestamp"],
+                "last_timestamp": info["last_timestamp"],
+                "label_counts": json.dumps({str(k): int(v)
+                                            for k, v in info["label_counts"].items()}),
+                "nan_cells": info["nan_cells"], "inf_cells": info["inf_cells"],
+                "status": "loaded",
+            })
+        except Exception as exc:                     # one bad file must not stop the rest
+            row.update({"status": "FAILED", "error": "%s: %s" % (type(exc).__name__, exc)})
+            failures.append({"file": f.path.name, "error": row["error"]})
+        rows.append(row)
+
+    report = pd.DataFrame(rows, columns=ACQUISITION_FIELDS)
+
+    if save_report:
+        config.STEP2_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        report.to_csv(config.STEP2_OUTPUT_DIR / "acquisition_report.csv", index=False)
+
+    if verbose:
+        show_title("Step 2.1 -- files loaded from %s" % folder)
+        show_table(report.drop(columns=["error"] if not failures else []))
+        loaded = sum(1 for r in rows if r["status"] == "loaded")
+        total_rows = sum(int(r["rows"] or 0) for r in rows if r["status"] == "loaded")
+        show_table(kv_table([("folder", str(folder)),
+                             ("files found", len(files)),
+                             ("loaded", loaded),
+                             ("failed", len(failures)),
+                             ("total rows", f"{total_rows:,}")]))
+        if failures:
+            show_note("These files could NOT be read and are excluded from Step 3:")
+            show_table(pd.DataFrame(failures))
+        if save_report:
+            show_note("Report saved to %s"
+                      % (config.STEP2_OUTPUT_DIR / "acquisition_report.csv"))
+
+    if not frames:
+        raise MissingCapturesError(
+            "Step 2 loaded no usable capture at all from:\n    %s" % folder)
+    return frames, report, failures
+
+
+# ===========================================================================
+# STEP 3 -- column consistency across the captures
+# ===========================================================================
+def check_column_consistency(frames: dict[str, pd.DataFrame],
+                             verbose: bool = True) -> tuple[pd.DataFrame, bool]:
+    """Every capture must have the same columns, in the same order.
+
+    Differences are REPORTED in a table rather than silently filled: pandas
+    would happily concatenate mismatched frames and quietly insert NaN, which
+    would look like missing data later instead of like the bug it is.
+
+    Returns (table, all_consistent).
+    """
+    reference_name = next(iter(frames))
+    reference = list(frames[reference_name].columns)
+
+    rows = []
+    for capture, df in frames.items():
+        cols = list(df.columns)
+        missing = [c for c in reference if c not in cols]
+        extra = [c for c in cols if c not in reference]
+        same_order = cols == reference
+        rows.append({
+            "capture": capture, "columns": len(cols),
+            "missing_vs_reference": ", ".join(missing) if missing else "",
+            "extra_vs_reference": ", ".join(extra) if extra else "",
+            "same_order": same_order,
+            "status": "ok" if (not missing and not extra and same_order) else "MISMATCH",
+        })
+    table = pd.DataFrame(rows)
+    consistent = bool((table["status"] == "ok").all())
+
+    if verbose:
+        show_title("Step 3.1 -- column consistency across captures")
+        show_table(table,
+                   note="Reference capture: **%s** (%d columns). A mismatch is reported, "
+                        "never silently filled -- concatenating mismatched frames would "
+                        "insert NaN that looks like missing data."
+                        % (reference_name, len(reference)))
+        if not consistent:
+            show_note("**[FAIL]** the captures do not share one column set -- fix Step 1 "
+                      "before merging.")
+    return table, consistent
+
+
+# ===========================================================================
 # 4. merge
 # ===========================================================================
 def merge_flow_csvs(frames: dict[str, pd.DataFrame] | None = None,
@@ -521,81 +666,156 @@ def check_merge(merged: pd.DataFrame, infos: Sequence[dict[str, Any]],
 # ===========================================================================
 # 6. save
 # ===========================================================================
+def verify_merged_file(merged: pd.DataFrame, path: Path | None = None,
+                       verbose: bool = True, expect_match: bool = True) -> dict[str, Any]:
+    """Prove the merged dataset really is on disk, and say how it compares.
+
+    Checks, in order: the file exists; its absolute path; its size; and its row
+    and column counts RE-READ FROM DISK against the in-memory frame.  Prints
+    [OK] or a clear [FAIL] -- never "saved" without having looked.
+
+    expect_match=False is used when an existing file was deliberately KEPT
+    (OVERWRITE_MERGED is off).  A row-count difference is then the expected
+    consequence of that choice, not a failure, so the file is judged on being
+    readable and non-empty -- but the difference is still reported loudly, so a
+    stale file cannot pass unnoticed.
+    """
+    path = Path(path) if path is not None else config.MERGED_CSV
+    result: dict[str, Any] = {"path": str(path.resolve()) if path.exists() else str(path),
+                              "exists": path.exists()}
+
+    if not path.exists():
+        result.update({"ok": False, "reason": "the file does not exist"})
+        if verbose:
+            show_table(kv_table([("expected path", str(path)),
+                                 ("exists", False),
+                                 ("result", "[FAIL] nothing was written")]))
+        return result
+
+    size = path.stat().st_size
+    on_disk = load_merged(path, verbose=False)
+    result.update({
+        "size_bytes": size,
+        "size_mb": round(size / 1024 / 1024, 2),
+        "rows_in_memory": int(merged.shape[0]), "rows_on_disk": int(on_disk.shape[0]),
+        "cols_in_memory": int(merged.shape[1]), "cols_on_disk": int(on_disk.shape[1]),
+    })
+    rows_ok = result["rows_in_memory"] == result["rows_on_disk"]
+    cols_ok = result["cols_in_memory"] == result["cols_on_disk"]
+    result["matches_memory"] = bool(rows_ok and cols_ok)
+    result["stale"] = bool(not result["matches_memory"] and not expect_match)
+    result["ok"] = (bool(rows_ok and cols_ok and size > 0) if expect_match
+                    else bool(size > 0))
+    result["dataframe"] = on_disk
+
+    if expect_match:
+        verdict = ("[OK] the merged dataset is on disk and matches"
+                   if result["ok"] else "[FAIL] the file on disk does NOT match")
+    elif result["matches_memory"]:
+        verdict = "[OK] the existing file was kept, and it matches what was just built"
+    else:
+        verdict = ("[OK] file is valid, but it DIFFERS from what was just built "
+                   "-- set config.OVERWRITE_MERGED = True to replace it")
+
+    if verbose:
+        show_table(kv_table([
+            ("absolute path", result["path"]),
+            ("exists", True),
+            ("size (MB)", result["size_mb"]),
+            ("rows: in memory -> on disk",
+             "%s -> %s  %s" % (f"{result['rows_in_memory']:,}",
+                               f"{result['rows_on_disk']:,}",
+                               "same" if rows_ok else "DIFFERENT")),
+            ("columns: in memory -> on disk",
+             "%s -> %s  %s" % (result["cols_in_memory"], result["cols_on_disk"],
+                               "same" if cols_ok else "DIFFERENT")),
+            ("result", verdict)]))
+        if result["stale"]:
+            show_note("**The file on disk is NOT the dataset you just built.** It has "
+                      "%s rows; the merge produced %s. Everything downstream will read "
+                      "the file, so set `config.OVERWRITE_MERGED = True` and re-run this "
+                      "cell if Step 1 or Step 2 changed."
+                      % (f"{result['rows_on_disk']:,}", f"{result['rows_in_memory']:,}"))
+    return result
+
+
 def save_merged(merged: pd.DataFrame, checks: Sequence[dict[str, Any]] | None = None,
                 infos: Sequence[dict[str, Any]] | None = None,
                 overwrite: bool | None = None,
                 verbose: bool = True) -> dict[str, Any]:
-    """Write MERGED_CSV, MERGED_PARQUET (if pyarrow is there) and merge_report.csv.
+    """STEP 3: write the merged dataset to config.MERGED_CSV, then VERIFY it.
 
-    An existing file is kept unless config.OVERWRITE_MERGED is True.
+    config.MERGED_CSV is absolute and hangs off DATA_ROOT, so the destination
+    does not depend on where the notebook was started or where the code lives.
+    The folder is created if missing.
+
+    If the file already exists and overwrite is off, it is NOT rewritten: that
+    is said plainly and the existing file is LOADED instead, so the returned
+    report always describes a real file on disk.
     """
     overwrite = config.OVERWRITE_MERGED if overwrite is None else overwrite
-    config.MERGED_DIR.mkdir(parents=True, exist_ok=True)
-    config.STEP2_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out: dict[str, Any] = {}
+    config.STEP3_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out: dict[str, Any] = {"target": str(config.MERGED_CSV),
+                           "folder": str(config.STEP3_OUTPUT_DIR)}
 
-    # --- CSV -------------------------------------------------------------
     if config.MERGED_CSV.exists() and not overwrite:
-        out["csv"] = "skipped (exists, config.OVERWRITE_MERGED is False)"
+        out["status"] = "kept_existing"
         if verbose:
-            print("  [SKIP]  %s already exists; set config.OVERWRITE_MERGED = True to redo it"
-                  % config.MERGED_CSV.name)
+            show_note("`%s` already exists and `config.OVERWRITE_MERGED` is **False**, "
+                      "so it was NOT rewritten -- the existing file is loaded instead. "
+                      "Set `OVERWRITE_MERGED = True` to replace it."
+                      % config.MERGED_CSV)
     else:
         merged.to_csv(config.MERGED_CSV, index=False)
-        out["csv"] = str(config.MERGED_CSV)
+        out["status"] = "written"
         if verbose:
-            print("  [SAVE]  %s  (%.1f MB)"
-                  % (config.MERGED_CSV, config.MERGED_CSV.stat().st_size / 1024 / 1024))
+            show_note("Wrote **%s**" % config.MERGED_CSV)
 
-    # --- Parquet ---------------------------------------------------------
+    # --- Parquet (optional, same folder) ---------------------------------
     try:
         import pyarrow  # noqa: F401
     except ImportError:
         out["parquet"] = "skipped (pyarrow not installed)"
         if verbose:
-            print("  [SKIP]  Parquet: pyarrow is not installed.  To enable it:")
-            print('             "%s" -m pip install pyarrow' % sys.executable)
-            print("          Continuing with the CSV only -- nothing is lost.")
+            show_note("Parquet skipped: pyarrow is not installed "
+                      "(`\"%s\" -m pip install pyarrow`). The CSV is unaffected."
+                      % sys.executable)
     else:
         if config.MERGED_PARQUET.exists() and not overwrite:
-            out["parquet"] = "skipped (exists, config.OVERWRITE_MERGED is False)"
-            if verbose:
-                print("  [SKIP]  %s already exists" % config.MERGED_PARQUET.name)
+            out["parquet"] = "kept existing"
         else:
             merged.to_parquet(config.MERGED_PARQUET, index=False)
             out["parquet"] = str(config.MERGED_PARQUET)
-            if verbose:
-                print("  [SAVE]  %s  (%.1f MB)"
-                      % (config.MERGED_PARQUET,
-                         config.MERGED_PARQUET.stat().st_size / 1024 / 1024))
 
-    # --- merge report ----------------------------------------------------
+    # --- the merge report -------------------------------------------------
     report_rows: list[dict[str, Any]] = []
     for i in (infos or []):
         report_rows.append({
-            "kind": "file", "name": i["capture"], "expected": "",
-            "actual": "", "result": "",
-            "rows": i["rows"], "nan_cells": i["nan_cells"], "inf_cells": i["inf_cells"],
-            "label_counts": json.dumps({str(k): int(v)
-                                        for k, v in i["label_counts"].items()}),
+            "kind": "file", "name": i["capture"], "expected": "", "actual": "",
+            "result": "", "rows": i["rows"], "nan_cells": i["nan_cells"],
+            "inf_cells": i["inf_cells"],
+            "label_counts": json.dumps({str(k): int(v) for k, v in i["label_counts"].items()}),
             "timestamp_format": i["timestamp_format"] or "",
             "first_timestamp": str(i["first_timestamp"]),
             "last_timestamp": str(i["last_timestamp"]),
         })
     for c in (checks or []):
         report_rows.append({
-            "kind": "check", "name": c["check"],
-            "expected": str(c["expected"])[:300], "actual": str(c["actual"])[:300],
-            "result": c["result"], "rows": "", "nan_cells": "", "inf_cells": "",
-            "label_counts": "", "timestamp_format": "",
-            "first_timestamp": "", "last_timestamp": "",
+            "kind": "check", "name": c["check"], "expected": str(c["expected"])[:300],
+            "actual": str(c["actual"])[:300], "result": c["result"], "rows": "",
+            "nan_cells": "", "inf_cells": "", "label_counts": "",
+            "timestamp_format": "", "first_timestamp": "", "last_timestamp": "",
         })
-    report = pd.DataFrame(report_rows)
-    report_path = config.STEP2_OUTPUT_DIR / "merge_report.csv"
-    report.to_csv(report_path, index=False)
+    report_path = config.STEP3_OUTPUT_DIR / "merge_report.csv"
+    pd.DataFrame(report_rows).to_csv(report_path, index=False)
     out["report"] = str(report_path)
-    if verbose:
-        print("  [SAVE]  %s" % report_path)
+
+    # --- and prove it ------------------------------------------------------
+    out["verification"] = verify_merged_file(
+        merged, config.MERGED_CSV, verbose=verbose,
+        expect_match=(out["status"] == "written"))
+    out["stale"] = bool(out["verification"].get("stale"))
+    out["ok"] = bool(out["verification"].get("ok"))
     return out
 
 
@@ -640,6 +860,93 @@ DESCRIBE_COLUMNS = ["Flow Duration", "Tot Fwd Pkts", "Tot Bwd Pkts",
 PROTOCOL_NAMES = {6: "TCP", 17: "UDP", 1: "ICMP"}
 
 
+# ---------------------------------------------------------------------------
+# display helpers -- rendered tables in Jupyter, plain text everywhere else
+# ---------------------------------------------------------------------------
+# Every section below builds a DataFrame and hands it to show_table().  Inside
+# Jupyter that renders as a real HTML table; in a plain script or under pytest
+# there is no IPython, so it falls back to printing.  Nothing here changes a
+# value -- it is presentation only.
+def _ipython():
+    """The live IPython shell, or None when not running inside one."""
+    try:
+        from IPython import get_ipython
+    except ImportError:
+        return None
+    try:
+        return get_ipython()
+    except Exception:
+        return None
+
+
+def in_notebook() -> bool:
+    """True when there is an IPython shell to render into."""
+    return _ipython() is not None
+
+
+def show_title(text: str, level: int = 3) -> None:
+    """A section heading: markdown in Jupyter, a banner on the console."""
+    if in_notebook():
+        from IPython.display import Markdown, display
+        display(Markdown("%s %s" % ("#" * level, text)))
+    else:
+        print()
+        print("=" * 78)
+        print(text)
+        print("=" * 78)
+
+
+def show_note(text: str) -> None:
+    """A small italic note under a table."""
+    if in_notebook():
+        from IPython.display import Markdown, display
+        display(Markdown("_%s_" % text))
+    else:
+        print("  %s" % text)
+
+
+def show_table(frame: pd.DataFrame, note: str | None = None,
+               all_columns: bool = False) -> None:
+    """Render a DataFrame as a table, or print it when there is no IPython.
+
+    all_columns=True widens pandas' display just for this one call, using
+    option_context so the global options are left exactly as they were.
+    """
+    if all_columns:
+        # scroll horizontally rather than collapsing columns into "..."
+        with pd.option_context("display.max_columns", None, "display.width", None):
+            if in_notebook():
+                from IPython.display import display
+                display(frame)
+            else:
+                print(frame.to_string())
+    elif in_notebook():
+        from IPython.display import display
+        display(frame)
+    else:
+        with pd.option_context("display.max_columns", None, "display.width", None):
+            print(frame.to_string())
+    if note:
+        show_note(note)
+
+
+def kv_table(pairs: Sequence[tuple[str, Any]]) -> pd.DataFrame:
+    """A plain two-column metric/value table."""
+    return pd.DataFrame({"metric": [k for k, _ in pairs],
+                         "value": [v for _, v in pairs]})
+
+
+def normalise_label(name: Any) -> str:
+    """Fold a label for MATCHING only -- the original spelling is never changed.
+
+    Trims, lower-cases, and treats spaces and underscores as the same, so
+    "Web_Crwling", "web crwling" and " Web Crwling " all match each other.
+    Both original spellings are still shown in the comparison table.
+    """
+    import re
+    return re.sub(r"[\s_]+", "_", str(name).strip().lower())
+
+
 def plot_label_counts(df: pd.DataFrame, path: Path | None = None,
                       verbose: bool = True) -> Path | None:
     """Bar chart of the Label counts on a log scale -> PNG.
@@ -659,7 +966,7 @@ def plot_label_counts(df: pd.DataFrame, path: Path | None = None,
             print('             "%s" -m pip install matplotlib' % sys.executable)
         return None
 
-    path = Path(path) if path is not None else config.STEP2_OUTPUT_DIR / "label_counts.png"
+    path = Path(path) if path is not None else config.STEP3_OUTPUT_DIR / "label_counts.png"
     path.parent.mkdir(parents=True, exist_ok=True)
 
     counts = df[config.LABEL_COLUMN].value_counts().sort_values(ascending=False)
@@ -699,215 +1006,370 @@ def plot_label_counts(df: pd.DataFrame, path: Path | None = None,
     return path
 
 
-def compare_labels_with_kaggle(df: pd.DataFrame, verbose: bool = True):
-    """Reference only: our Label counts beside the Kaggle MSCAD.csv counts.
+def read_kaggle_labels(folder: Path | None = None, verbose: bool = True):
+    """Read the Label column of the Kaggle MSCAD file.  Never raises.
 
-    Returns None when there is no Kaggle file -- that is not an error, and
-    nothing in Step 2 depends on it.
+    Returns (counts dict keyed by the ORIGINAL label spelling, info dict).
+    counts is None when the folder or the file is missing, or the file cannot
+    be read -- the caller prints one line and carries on, because nothing in
+    Step 2 depends on this comparison.
+    """
+    info: dict[str, Any] = {"path": None, "candidates": [], "problem": None}
+    base = Path(folder) if folder is not None else config.KAGGLE_CSV_DIR
+    info["folder"] = str(base)
+
+    if not base.is_dir():
+        info["problem"] = "folder does not exist: %s" % base
+        if verbose:
+            print("  Kaggle reference skipped -- %s" % info["problem"])
+        return None, info
+
+    path, candidates = config.find_kaggle_csv(base)
+    info["candidates"] = [p.name for p in candidates]
+    if path is None:
+        info["problem"] = "no .csv or .xlsx in %s" % base
+        if verbose:
+            print("  Kaggle reference skipped -- %s" % info["problem"])
+        return None, info
+    info["path"] = str(path)
+
+    try:
+        if path.suffix.lower() in (".xlsx", ".xls"):
+            try:
+                import openpyxl  # noqa: F401
+            except ImportError:
+                info["problem"] = ("%s is a spreadsheet and openpyxl is not installed "
+                                   "(pip install openpyxl)" % path.name)
+                if verbose:
+                    print("  Kaggle reference skipped -- %s" % info["problem"])
+                return None, info
+            kag = pd.read_excel(path)
+        else:
+            kag = pd.read_csv(path, low_memory=False)
+    except Exception as exc:
+        info["problem"] = "could not read %s: %r" % (path.name, exc)
+        if verbose:
+            print("  Kaggle reference skipped -- %s" % info["problem"])
+        return None, info
+
+    label_col = next((c for c in kag.columns
+                      if str(c).strip().lower() == config.LABEL_COLUMN.lower()), None)
+    if label_col is None:
+        info["problem"] = "%s has no Label column" % path.name
+        if verbose:
+            print("  Kaggle reference skipped -- %s" % info["problem"])
+        return None, info
+
+    info["rows"] = len(kag)
+    info["label_column"] = str(label_col)
+    return {str(k): int(v) for k, v in kag[label_col].value_counts().items()}, info
+
+
+def compare_labels_with_kaggle(df: pd.DataFrame, folder: Path | None = None,
+                               verbose: bool = True):
+    """Reference-only comparison of our Label counts with the Kaggle file's.
+
+    Labels are matched on a NORMALISED form (trimmed, lower-cased, spaces and
+    underscores equivalent) but both original spellings are shown -- nothing is
+    renamed.  Labels present on only one side get their own small table.
+
+    Returns a dict with the tables, or None when there is no Kaggle file.
     """
     ours = {str(k): int(v) for k, v in df[config.LABEL_COLUMN].value_counts().items()}
-    path = config.find_kaggle_file()
-    if path is None:
+    theirs, info = read_kaggle_labels(folder, verbose=verbose)
+
+    if theirs is None:
         if verbose:
-            print("  no Kaggle file in %s, so there is nothing to compare against."
-                  % config.KAGGLE_DIR)
-            print("  our own label counts:")
-            for label, n in sorted(ours.items(), key=lambda kv: -kv[1]):
-                print("     %-18s %12s" % (label, f"{n:,}"))
+            show_note("Nothing to compare against, so only our own counts are shown. "
+                      "This is not an error: Step 2 does not depend on the Kaggle file.")
+            show_table(pd.DataFrame({"Label": list(ours),
+                                     "ours": [ours[k] for k in ours]})
+                       .sort_values("ours", ascending=False).reset_index(drop=True))
         return None
 
-    kag = (pd.read_excel(path) if path.suffix.lower() in (".xlsx", ".xls")
-           else pd.read_csv(path, low_memory=False))
-    kag.columns = [str(c).strip() for c in kag.columns]
-    theirs = {str(k): int(v) for k, v in kag[config.LABEL_COLUMN].value_counts().items()}
+    if verbose:
+        if len(info["candidates"]) > 1:
+            show_note("%d files in %s: %s -- using **%s**"
+                      % (len(info["candidates"]), info["folder"],
+                         ", ".join(info["candidates"]), Path(info["path"]).name))
+        else:
+            show_note("Kaggle file: %s (%s rows)"
+                      % (info["path"], f"{info.get('rows', 0):,}"))
+
+    ours_norm = {normalise_label(k): k for k in ours}
+    theirs_norm = {normalise_label(k): k for k in theirs}
+    shared = [k for k in ours_norm if k in theirs_norm]
+
+    rows = []
+    for key in sorted(shared, key=lambda k: -ours[ours_norm[k]]):
+        our_name, their_name = ours_norm[key], theirs_norm[key]
+        o, t = ours[our_name], theirs[their_name]
+        rows.append({"Label": our_name, "ours": o, "kaggle": t,
+                     "difference": o - t,
+                     "% difference": (100.0 * (o - t) / t) if t else float("nan")})
+    table = pd.DataFrame(rows)
+    if len(table):
+        total_o, total_t = int(table["ours"].sum()), int(table["kaggle"].sum())
+        table = pd.concat([table, pd.DataFrame([{
+            "Label": "TOTAL (matched)", "ours": total_o, "kaggle": total_t,
+            "difference": total_o - total_t,
+            "% difference": (100.0 * (total_o - total_t) / total_t) if total_t else float("nan"),
+        }])], ignore_index=True)
+        table["% difference"] = table["% difference"].round(2)
+
+    one_sided = pd.DataFrame(
+        [{"Label": ours_norm[k], "side": "ours only", "flows": ours[ours_norm[k]]}
+         for k in ours_norm if k not in theirs_norm]
+        + [{"Label": theirs_norm[k], "side": "Kaggle only", "flows": theirs[theirs_norm[k]]}
+           for k in theirs_norm if k not in ours_norm])
+
+    spelling = pd.DataFrame(
+        [{"our spelling": ours_norm[k], "Kaggle spelling": theirs_norm[k]}
+         for k in shared if ours_norm[k] != theirs_norm[k]])
 
     if verbose:
-        print("  %-18s %14s %14s   %s" % ("LABEL", "OURS", "KAGGLE", "NOTE"))
-        print("  " + "-" * 66)
-        for label in sorted(set(ours) | set(theirs), key=lambda k: -ours.get(k, 0)):
-            note = ""
-            if label not in theirs:
-                note = "only ours (we create Benign)"
-            elif label not in ours:
-                note = "only Kaggle"
-            print("  %-18s %14s %14s   %s"
-                  % (label, f"{ours.get(label, 0):,}", f"{theirs.get(label, 0):,}", note))
-        print("  " + "-" * 66)
-        print("  %-18s %14s %14s" % ("TOTAL", f"{sum(ours.values()):,}",
-                                     f"{sum(theirs.values()):,}"))
-        print()
-        print("  REFERENCE ONLY. The Kaggle file was produced by the Java CICFlowMeter")
-        print("  with its own settings, so these counts are not expected to be equal,")
-        print("  and nothing here is adjusted to make them match.")
-    return {"ours": ours, "kaggle": theirs}
+        if len(table):
+            show_table(table,
+                       note=("'% difference' is (ours - kaggle) / kaggle x 100. "
+                             "REFERENCE ONLY: the Kaggle file was produced by the Java "
+                             "CICFlowMeter with its own settings, so these are not "
+                             "expected to match and nothing here is adjusted to make "
+                             "them match."))
+        else:
+            show_note("No label matched between the two files.")
+        if len(one_sided):
+            show_note("Labels present on only one side (nothing was renamed):")
+            show_table(one_sided)
+        if len(spelling):
+            show_note("Matched on the normalised form, but spelled differently:")
+            show_table(spelling)
+
+    return {"table": table, "one_sided": one_sided, "spelling": spelling,
+            "ours": ours, "kaggle": theirs, "info": info}
+
+
+def describe_table(df: pd.DataFrame, columns: Sequence[str] | None = None) -> pd.DataFrame:
+    """describe() for the key features, computed WITHOUT inf so it is readable.
+
+    inf makes mean, std and the quantiles undefined and makes numpy emit
+    "invalid value encountered in subtract" warnings.  For the DISPLAY only we
+    replace inf with NaN on a COPY, and add an inf_count column so the inf
+    values are still visible as a number.  df itself is never modified.
+    """
+    cols = [c for c in (columns or DESCRIBE_COLUMNS) if c in df.columns]
+    block = df[cols]
+    inf_counts = {c: int(np.isinf(block[c].to_numpy(dtype="float64")).sum()) for c in cols}
+    finite = block.replace([np.inf, -np.inf], np.nan)
+    out = finite.describe().T
+    out.insert(0, "inf_count", [inf_counts[c] for c in out.index])
+    return out
 
 
 def summarize_dataset(df: pd.DataFrame, make_plot: bool = True,
                       compare_kaggle: bool = True) -> dict[str, Any]:
-    """Print the full overview of the reloaded merged dataset.
+    """The full overview of the reloaded merged dataset, as rendered tables.
 
-    Counts only -- nothing is dropped, filled or changed anywhere in here.
+    Counts and describes only: nothing is dropped, filled or changed anywhere.
     """
     out: dict[str, Any] = {}
+    feats = [c for c in config.KAGGLE_FEATURES if c in df.columns]
 
-    print("=" * 78)
-    print("1. shape and memory")
-    print("=" * 78)
+    # --- 1. shape and memory --------------------------------------------
+    show_title("1. Shape and memory")
     mem_mb = df.memory_usage(deep=True).sum() / 1024 / 1024
-    out["shape"] = df.shape
-    out["memory_mb"] = round(mem_mb, 1)
-    print("  shape          : %s" % (df.shape,))
-    print("  memory (deep)  : %.1f MB" % mem_mb)
-    if mem_mb > 2048:
-        print("  [NOTE] over 2 GB in memory. Step 3 could downcast float64 -> float32")
-        print("         and the identifier columns -> category, which typically saves")
-        print("         50-70%. NOT applied here: Step 2 does not change values.")
-    else:
-        print("  comfortably under the 2 GB mark, so no downcasting is suggested.")
+    out["shape"], out["memory_mb"] = df.shape, round(mem_mb, 1)
+    verdict = ("over 2 GB -- Step 3 could downcast float64 to float32 and the "
+               "identifier columns to category (typically 50-70% smaller). NOT "
+               "applied here: Step 2 does not change values."
+               if mem_mb > 2048 else
+               "comfortably under 2 GB, so no downcasting is suggested")
+    show_table(kv_table([("rows", f"{df.shape[0]:,}"),
+                         ("columns", df.shape[1]),
+                         ("memory, deep (MB)", round(mem_mb, 1)),
+                         ("verdict", verdict)]))
 
-    print()
-    print("=" * 78)
-    print("2. head(10)")
-    print("=" * 78)
-    print(df.head(10).to_string())
+    # --- 2 & 3. head and tail -------------------------------------------
+    show_title("2. head(10)")
+    show_table(df.head(10), all_columns=True,
+               note="All %d columns; scroll sideways to see them." % df.shape[1])
+    show_title("3. tail(5)")
+    show_table(df.tail(5), all_columns=True)
 
-    print()
-    print("=" * 78)
-    print("3. tail(5)")
-    print("=" * 78)
-    print(df.tail(5).to_string())
+    # --- 4. info ---------------------------------------------------------
+    show_title("4. Columns, dtypes and null counts")
+    info_tbl = pd.DataFrame({
+        "column": df.columns,
+        "dtype": [str(t) for t in df.dtypes],
+        "non_null": [int(df[c].notna().sum()) for c in df.columns],
+        "null": [int(df[c].isna().sum()) for c in df.columns],
+    })
+    out["info_table"] = info_tbl
+    show_table(info_tbl)
 
-    print()
-    print("=" * 78)
-    print("4. info()")
-    print("=" * 78)
-    df.info(verbose=True, show_counts=True)
-
-    print()
-    print("=" * 78)
-    print("5. Label counts and percentages")
-    print("=" * 78)
+    # --- 5. labels -------------------------------------------------------
+    show_title("5. Label counts")
     counts = df[config.LABEL_COLUMN].value_counts()
     out["label_counts"] = counts.to_dict()
-    print("  %-18s %12s %9s" % ("LABEL", "FLOWS", "SHARE"))
-    print("  " + "-" * 42)
-    for label, n in counts.items():
-        print("  %-18s %12s %8.3f%%" % (label, f"{n:,}", 100.0 * n / len(df)))
-    print("  " + "-" * 42)
-    print("  %-18s %12s %8.3f%%" % ("TOTAL", f"{len(df):,}", 100.0))
+    label_tbl = pd.DataFrame({"Label": counts.index.astype(str),
+                              "flows": counts.to_numpy(),
+                              "share_%": (100.0 * counts / len(df)).round(3).to_numpy()})
+    label_tbl = pd.concat([label_tbl, pd.DataFrame([{
+        "Label": "TOTAL", "flows": len(df), "share_%": 100.0}])], ignore_index=True)
     imbalance = counts.max() / max(1, counts.min())
     out["imbalance_ratio"] = round(float(imbalance), 1)
-    print("  largest class / smallest class = %.1f : 1   <- Step 3 has to deal with this"
-          % imbalance)
+    show_table(label_tbl,
+               note="Largest class / smallest class = **%.1f : 1** -- Step 3 has to "
+                    "deal with this." % imbalance)
 
-    print()
-    print("=" * 78)
-    print("6. Source_Capture x Label")
-    print("=" * 78)
+    # --- 6. capture x label ---------------------------------------------
+    show_title("6. Source_Capture x Label")
     crosstab = pd.crosstab(df["Source_Capture"], df[config.LABEL_COLUMN], margins=True)
     out["crosstab"] = crosstab
-    print(crosstab.to_string())
+    show_table(crosstab)
 
-    print()
-    print("=" * 78)
-    print("7. first and last Timestamp per capture")
-    print("=" * 78)
+    # --- 7. time ---------------------------------------------------------
+    show_title("7. First and last Timestamp per capture")
     times = df.groupby("Source_Capture")[TIMESTAMP_DT_COLUMN].agg(["min", "max", "count"])
     times["duration"] = times["max"] - times["min"]
     out["time_ranges"] = times
-    print(times.to_string())
     n_nat = int(df[TIMESTAMP_DT_COLUMN].isna().sum())
-    print()
-    print("  unparsed timestamps (NaT): %d" % n_nat)
-    is_sorted = df[TIMESTAMP_DT_COLUMN].dropna().is_monotonic_increasing
-    out["sorted_by_time"] = bool(is_sorted)
-    print("  rows are in ascending Timestamp order: %s" % is_sorted)
+    is_sorted = bool(df[TIMESTAMP_DT_COLUMN].dropna().is_monotonic_increasing)
+    out["sorted_by_time"] = is_sorted
+    show_table(times.reset_index(),
+               note="Unparsed timestamps (NaT): **%d**. Rows in ascending Timestamp "
+                    "order: **%s**." % (n_nat, is_sorted))
 
-    print()
-    print("=" * 78)
-    print("8. identifiers and protocols")
-    print("=" * 78)
+    # --- 8. identifiers and protocols ------------------------------------
+    show_title("8. Identifiers and protocols")
     out["unique_src_ip"] = int(df["Src IP"].nunique())
     out["unique_dst_ip"] = int(df["Dst IP"].nunique())
-    print("  unique Src IP : %s" % f"{out['unique_src_ip']:,}")
-    print("  unique Dst IP : %s" % f"{out['unique_dst_ip']:,}")
-    print("  unique Src Port / Dst Port : %s / %s"
-          % (f"{df['Src Port'].nunique():,}", f"{df['Dst Port'].nunique():,}"))
-    print()
+    show_table(kv_table([("unique Src IP", f"{out['unique_src_ip']:,}"),
+                         ("unique Dst IP", f"{out['unique_dst_ip']:,}"),
+                         ("unique Src Port", f"{df['Src Port'].nunique():,}"),
+                         ("unique Dst Port", f"{df['Dst Port'].nunique():,}")]))
     proto = df["Protocol"].value_counts().sort_index()
     out["protocol_counts"] = proto.to_dict()
-    print("  %-10s %-6s %12s %9s" % ("PROTOCOL", "NAME", "FLOWS", "SHARE"))
-    print("  " + "-" * 42)
-    for num, n in proto.items():
-        print("  %-10s %-6s %12s %8.3f%%"
-              % (num, PROTOCOL_NAMES.get(int(num), "other"), f"{n:,}",
-                 100.0 * n / len(df)))
+    show_table(pd.DataFrame({
+        "Protocol": proto.index.astype(int),
+        "name": [PROTOCOL_NAMES.get(int(n), "other") for n in proto.index],
+        "flows": proto.to_numpy(),
+        "share_%": (100.0 * proto / len(df)).round(3).to_numpy()}))
 
-    print()
-    print("=" * 78)
-    print("9. NaN and inf, per column (only columns with a non-zero count)")
-    print("=" * 78)
-    feats = [c for c in config.KAGGLE_FEATURES if c in df.columns]
+    # --- 9. NaN and inf ---------------------------------------------------
+    show_title("9. NaN and inf per column")
     nan_by_col = df[feats].isna().sum()
-    inf_by_col = pd.Series(
-        {c: int(np.isinf(df[c].to_numpy(dtype="float64")).sum()) for c in feats})
-    out["nan_total"] = int(nan_by_col.sum())
-    out["inf_total"] = int(inf_by_col.sum())
-    shown = False
-    for c in feats:
-        if nan_by_col[c] or inf_by_col[c]:
-            shown = True
-            print("  %-22s NaN %8s   inf %8s"
-                  % (c, f"{int(nan_by_col[c]):,}", f"{int(inf_by_col[c]):,}"))
-    if not shown:
-        print("  no column has any NaN or inf.")
-    print()
-    print("  totals: NaN %s cells, inf %s cells (across the 66 features)"
-          % (f"{out['nan_total']:,}", f"{out['inf_total']:,}"))
-    print("  Both are KEPT. inf in Flow Byts/s and Flow Pkts/s is the correct answer")
-    print("  for a zero-duration flow; Step 3 decides what to do about it.")
+    inf_by_col = pd.Series({c: int(np.isinf(df[c].to_numpy(dtype="float64")).sum())
+                            for c in feats})
+    out["nan_total"], out["inf_total"] = int(nan_by_col.sum()), int(inf_by_col.sum())
+    nz = pd.DataFrame({"column": feats,
+                       "NaN": nan_by_col.reindex(feats).to_numpy(),
+                       "inf": inf_by_col.reindex(feats).to_numpy()})
+    nz = nz[(nz["NaN"] > 0) | (nz["inf"] > 0)].reset_index(drop=True)
+    out["nan_inf_table"] = nz
+    if len(nz):
+        show_table(nz,
+                   note="Totals across the 66 features: **%s NaN**, **%s inf**. Both are "
+                        "KEPT -- inf in a rate column is the correct answer for a "
+                        "zero-duration flow, and Step 3 decides what to do about it."
+                        % (f"{out['nan_total']:,}", f"{out['inf_total']:,}"))
+    else:
+        show_table(pd.DataFrame([{"column": "(none)", "NaN": 0, "inf": 0}]),
+                   note="No column has any NaN or inf.")
 
-    print()
-    print("=" * 78)
-    print("10. duplicates (counted, NOT dropped)")
-    print("=" * 78)
+    # --- 10. duplicates ---------------------------------------------------
+    show_title("10. Duplicates (counted, never dropped)")
     exact = int(df.duplicated().sum())
     same_features = int(df.duplicated(subset=feats).sum())
     same_flow = int(df.duplicated(subset=config.ID_COLUMNS).sum())
-    out["duplicate_rows"] = exact
-    out["identical_feature_rows"] = same_features
-    print("  exact duplicate rows (all %d columns) : %s"
-          % (len(df.columns), f"{exact:,}"))
-    print("  rows with identical 66-feature values : %s   (%.2f%% of the data)"
-          % (f"{same_features:,}", 100.0 * same_features / len(df)))
-    print("  rows with a repeated 5-tuple+Timestamp: %s" % f"{same_flow:,}")
-    print("  Expected in floods, port scans and brute force, where thousands of")
-    print("  flows genuinely look the same. Nothing is dropped here.")
+    out["duplicate_rows"], out["identical_feature_rows"] = exact, same_features
+    show_table(kv_table([
+        ("exact duplicate rows (all %d columns)" % df.shape[1], f"{exact:,}"),
+        ("rows with identical 66-feature values", f"{same_features:,}"),
+        ("  as a share of the data", "%.2f%%" % (100.0 * same_features / len(df))),
+        ("rows with a repeated 5-tuple + Timestamp", f"{same_flow:,}")]),
+        note="Expected in floods, port scans and brute force, where thousands of flows "
+             "genuinely look the same. Nothing is dropped here.")
 
-    print()
-    print("=" * 78)
-    print("11. describe() for the key features")
-    print("=" * 78)
-    cols = [c for c in DESCRIBE_COLUMNS if c in df.columns]
-    desc = df[cols].describe().T
+    # --- 11. describe -----------------------------------------------------
+    show_title("11. describe() for the key features")
+    desc = describe_table(df)
     out["describe"] = desc
-    print(desc.to_string())
-    print()
-    print("  NOTE: inf values make mean/std inf for the rate columns. That is")
-    print("  arithmetic, not a bug -- see section 9.")
+    show_table(desc,
+               note="Computed on a copy with inf replaced by NaN, so the statistics are "
+                    "readable and numpy emits no 'invalid value' warnings; the inf_count "
+                    "column shows how many inf values each feature really has. The "
+                    "dataset itself still holds its inf values.")
 
+    # --- 12. chart --------------------------------------------------------
     if make_plot:
-        print()
-        print("=" * 78)
-        print("12. Label bar chart (log scale)")
-        print("=" * 78)
+        show_title("12. Label bar chart (log scale)")
         out["plot"] = plot_label_counts(df)
 
+    # --- 13. Kaggle reference --------------------------------------------
     if compare_kaggle:
-        print()
-        print("=" * 78)
-        print("13. our Label counts vs the Kaggle MSCAD.csv (reference only)")
-        print("=" * 78)
+        show_title("13. Our Label counts vs the Kaggle MSCAD file (reference only)")
         out["kaggle_comparison"] = compare_labels_with_kaggle(df)
 
     return out
+
+
+# ===========================================================================
+# STEP 3 -- report files
+# ===========================================================================
+def save_step3_reports(merged: pd.DataFrame, summary: dict[str, Any] | None = None,
+                       verbose: bool = True) -> dict[str, str]:
+    """Write the Step 3 reports beside the merged dataset, in STEP3_OUTPUT_DIR.
+
+    label_counts.csv, source_capture_x_label.csv, label_counts.png and
+    summary.txt -- all under C:\\MSCAD2022\\outputs\\step3, an absolute path.
+    """
+    config.STEP3_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    written: dict[str, str] = {}
+
+    counts = merged[config.LABEL_COLUMN].value_counts()
+    label_tbl = pd.DataFrame({"Label": counts.index.astype(str),
+                              "flows": counts.to_numpy(),
+                              "share_%": (100.0 * counts / len(merged)).round(4).to_numpy()})
+    path = config.STEP3_OUTPUT_DIR / "label_counts.csv"
+    label_tbl.to_csv(path, index=False)
+    written["label_counts"] = str(path)
+
+    crosstab = pd.crosstab(merged["Source_Capture"], merged[config.LABEL_COLUMN],
+                           margins=True)
+    path = config.STEP3_OUTPUT_DIR / "source_capture_x_label.csv"
+    crosstab.to_csv(path)
+    written["crosstab"] = str(path)
+
+    chart = plot_label_counts(merged, verbose=False)
+    if chart is not None:
+        written["chart"] = str(chart)
+
+    feats = [c for c in config.KAGGLE_FEATURES if c in merged.columns]
+    arr = merged[feats].to_numpy(dtype="float64")
+    lines = [
+        "MSCAD Step 3 -- merged dataset summary",
+        "=" * 60,
+        "merged file      : %s" % config.MERGED_CSV,
+        "rows             : %d" % merged.shape[0],
+        "columns          : %d" % merged.shape[1],
+        "captures         : %s" % ", ".join(sorted(merged["Source_Capture"].unique())),
+        "first timestamp  : %s" % merged[TIMESTAMP_DT_COLUMN].min(),
+        "last timestamp   : %s" % merged[TIMESTAMP_DT_COLUMN].max(),
+        "NaN cells (66 features) : %d" % int(np.isnan(arr).sum()),
+        "inf cells (66 features) : %d" % int(np.isinf(arr).sum()),
+        "exact duplicate rows    : %d" % int(merged.duplicated().sum()),
+        "identical-feature rows  : %d" % int(merged.duplicated(subset=feats).sum()),
+        "",
+        "label counts:",
+    ]
+    for label, n in counts.items():
+        lines.append("  %-18s %10d  (%.3f%%)" % (label, n, 100.0 * n / len(merged)))
+    lines += ["", "Nothing was cleaned: inf, NaN and duplicate rows are all kept."]
+    path = config.STEP3_OUTPUT_DIR / "summary.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    written["summary"] = str(path)
+
+    if verbose:
+        show_title("Step 3 report files")
+        show_table(pd.DataFrame({"report": list(written), "path": list(written.values())}))
+    return written
