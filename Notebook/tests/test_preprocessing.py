@@ -11,7 +11,7 @@ write to a configured folder on any operating system.
 """
 
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import numpy as np
 import pandas as pd
@@ -415,8 +415,12 @@ def test_step4_does_not_split_or_resample():
 # ===========================================================================
 def test_step4_refuses_a_windows_path_off_windows(tmp_path, monkeypatch, capsys,
                                                   assert_no_leaked_output):
-    monkeypatch.setattr(config, "STEP4_OUTPUT_DIR", Path(r"C:\MSCAD2022\outputs\step4"))
-    monkeypatch.setattr(config.os, "name", "posix")
+    # PureWindowsPath keeps the drive letter on every operating system and has
+    # no mkdir, so a regression raises here instead of writing into the real
+    # C:\MSCAD2022 on the machine that holds the dataset.
+    monkeypatch.setattr(config, "STEP4_OUTPUT_DIR",
+                        PureWindowsPath(r"C:\MSCAD2022\outputs\step4"))
+    monkeypatch.setattr(config, "running_on_windows", lambda: False)
     monkeypatch.chdir(tmp_path)
 
     df = make_merged()
