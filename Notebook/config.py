@@ -1171,3 +1171,74 @@ STEP12_FILES = {
 }
 
 DIRS_TO_CREATE.append(STEP12_OUTPUT_DIR)
+
+
+# ---------------- Step 13 - Adaptive Evidence Fusion ----------------
+# APPENDED for Step 13.  Nothing above this line was changed.
+#
+# Three heterogeneous models are combined into one fused risk score per flow.
+# Unlike a fixed-weight ensemble, each model's weight is set PER FLOW from two
+# measured quantities: how reliable that model has been in the current
+# behavioural context, and how confident it is on this particular flow.
+STEP13_OUTPUT_DIR = OUTPUTS_DIR / "step13"
+
+# The Step 12 configurations to fuse.  These names must exist in EXPERIMENTS;
+# fusion.check_fusion_models() verifies that at run time rather than assuming it.
+FUSION_MODELS = ["proposed", "baseline2_ae_lstm", "baseline3_cnn_lstm"]
+
+# How a model's reliability in a context is measured on the validation part.
+RELIABILITY_METRIC = "f1"          # or "precision"
+
+# Shrinkage towards the model's global macro-F1.  A context with few validation
+# rows gives an unstable per-context estimate, so it is pulled towards the global
+# figure; K is the number of rows at which the two contribute equally.
+SHRINKAGE_K = 20
+
+# Multiply reliability by a per-flow confidence term, 1 - normalised entropy.
+CONFIDENCE_TERM = True
+
+# "proportional" -> w_m = s_m / sum_j s_j   (default)
+# "softmax"      -> w_m = exp(s_m / T) / sum_j exp(s_j / T), T = WEIGHT_TEMPERATURE
+WEIGHT_MODE = "proportional"
+WEIGHT_TEMPERATURE = 0.2
+
+# When every s_m is effectively zero the weights are undefined, so the flow falls
+# back to equal weights rather than dividing by zero.
+EPSILON = 1e-6
+
+# "consensus_class" is label-free -- it uses the models' own mean prediction, so
+# it is available at test time.  "protocol" uses the flow's Protocol instead.
+CONTEXT_MODE = "consensus_class"   # or "protocol"
+
+# The decision threshold on the fused risk, chosen on VALIDATION and then applied
+# unchanged to the test set.
+THRESHOLD_RULE = "max_f1"          # or "fpr_at_most"
+TARGET_FPR = 0.01
+
+# Exponential moving average of the risk over consecutive flows within one
+# capture.  Off by default: the Step 5 split is random, so consecutive test flows
+# are not consecutive in the original capture.
+TEMPORAL_SMOOTHING = False
+EMA_ALPHA = 0.3
+
+OVERWRITE_STEP13 = False
+
+STEP13_FILES = {
+    "reliability": "reliability_table.csv",
+    "weights_summary": "weights_summary.csv",
+    "fused_predictions": "fused_predictions.csv",
+    "comparison": "comparison_table.csv",
+    "ablation": "ablation_table.csv",
+    "per_class": "per_class_f1.csv",
+    "threshold": "threshold.json",
+    "metrics": "metrics.json",
+    "report": "step13_report.csv",
+    "chart_reliability": "reliability_heatmap.png",
+    "chart_weights": "mean_weight_per_class.png",
+    "chart_risk": "risk_distribution.png",
+    "chart_curves": "roc_pr_curves.png",
+    "chart_comparison": "comparison_bars.png",
+    "chart_comparison_free": "comparison_bars_duplicate_free.png",
+}
+
+DIRS_TO_CREATE.append(STEP13_OUTPUT_DIR)
