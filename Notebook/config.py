@@ -1112,3 +1112,62 @@ DIRS_TO_CREATE.append(STEP8_OUTPUT_DIR)
 DIRS_TO_CREATE.append(STEP9_OUTPUT_DIR)
 DIRS_TO_CREATE.append(STEP10_OUTPUT_DIR)
 DIRS_TO_CREATE.append(STEP11_OUTPUT_DIR)
+
+
+# ---------------- Step 12 - Model comparison ----------------
+# APPENDED for Step 12.  Nothing above this line was changed.
+#
+# Step 12 compares the proposed pipeline with three baselines by CALLING the
+# Step 7-11 functions, never by modifying them.  Each configuration removes one
+# piece of the proposal, so a difference between two rows is attributable:
+#
+#   Proposed    feature selection -> AE(30->15) -> CNN-LSTM
+#   Baseline 1  (no selection)    -> AE(all->15) -> CNN-LSTM   -- what selection buys
+#   Baseline 2  (no selection)    -> AE(all->15) -> LSTM only  -- what the CNN buys
+#   Baseline 3  (no selection, no AE)           -> CNN-LSTM    -- what the AE buys
+STEP12_OUTPUT_DIR = OUTPUTS_DIR / "step12"
+
+# "all"        -> every Step 5 feature, which is the honest "no feature
+#                 selection, no autoencoder" baseline.
+# "selected30" -> the Step 6 features without the autoencoder, which isolates
+#                 the AE alone rather than selection and the AE together.
+BASELINE3_FEATURES = "all"
+
+# feature_source: "selected30" (Step 6) or "all" (Step 5)
+# use_ae:         train an autoencoder on the TRAINING rows and encode both sides
+# model_type:     "cnn_lstm" or "lstm"
+EXPERIMENTS = [
+    {"name": "proposed", "label": "Proposed: FS -> AE -> CNN-LSTM",
+     "feature_source": "selected30", "use_ae": True, "model_type": "cnn_lstm",
+     "reuse_step7_10": True},
+    {"name": "baseline1_ae_cnn_lstm", "label": "B1: AE -> CNN-LSTM (no selection)",
+     "feature_source": "all", "use_ae": True, "model_type": "cnn_lstm",
+     "reuse_step7_10": False},
+    {"name": "baseline2_ae_lstm", "label": "B2: AE -> LSTM (no CNN)",
+     "feature_source": "all", "use_ae": True, "model_type": "lstm",
+     "reuse_step7_10": False},
+    {"name": "baseline3_cnn_lstm", "label": "B3: CNN-LSTM (no AE)",
+     "feature_source": BASELINE3_FEATURES, "use_ae": False,
+     "model_type": "cnn_lstm", "reuse_step7_10": False},
+]
+
+# False = a configuration whose metrics.json is already on disk is skipped.
+# Training four models is slow, so this makes the notebook resumable.
+OVERWRITE_STEP12 = False
+
+STEP12_FILES = {
+    "comparison": "comparison_table.csv",
+    "per_class_full": "per_class_f1_full.csv",
+    "per_class_free": "per_class_f1_duplicate_free.csv",
+    "consistency": "consistency_checks.csv",
+    "seed_comparison": "seed_comparison.csv",
+    "environment": "environment.json",
+    "summary": "summary.md",
+    "chart_metrics": "comparison_metrics.png",
+    "chart_metrics_free": "comparison_metrics_duplicate_free.png",
+    "chart_per_class": "per_class_f1_heatmap.png",
+    "chart_time": "training_and_inference_time.png",
+    "chart_confusion": "confusion_matrices.png",
+}
+
+DIRS_TO_CREATE.append(STEP12_OUTPUT_DIR)
