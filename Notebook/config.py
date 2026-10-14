@@ -954,8 +954,161 @@ STEP8_FILES = {
     "report": "step8_report.csv",
 }
 
-# Declared above, before the Step 5-8 blocks existed.
+
+# ===========================================================================
+# STEP 9 -- class imbalance, handled in the TRAINING LOSS only
+# ===========================================================================
+# Input:  the Step 8 outputs (Z_train.csv, y_train.csv).
+# Output: STEP9_OUTPUT_DIR, created if missing.
+#
+# CLASS WEIGHTING ONLY.  No SMOTE, no SMOTE-ENN, no over- or undersampling,
+# and imbalanced-learn is deliberately not a dependency.  Every row that goes in
+# comes out: the weights change how much each row COUNTS in the loss, never how
+# many rows there are.
+#
+# Why weighting and not resampling, on this dataset.  About half the rows share
+# identical feature values once the identifiers are gone -- thousands of scan,
+# flood and brute-force flows genuinely look alike.  SMOTE interpolates between
+# nearest neighbours, so on identical rows it manufactures copies rather than new
+# information, and oversampling before an inner split copies rows across it.
+# Weighting avoids both: it adds no rows at all.
+#
+# The TEST SET IS NEVER TOUCHED by any of this.  Weights are computed from the
+# training rows alone, applied only in the training loss, and the test set is
+# scored exactly as it comes out of Step 8.  Reweighting the test set would make
+# the reported score a different question from the one being asked.
+STEP9_OUTPUT_DIR = OUTPUTS_DIR / "step9"      # C:\MSCAD2022\outputs\step9
+
+# "class_weight" -> weight the loss.  "none" -> every weight is 1.0, which is the
+# honest baseline to compare against.
+IMBALANCE_STRATEGY = "class_weight"
+
+# "balanced"      : w_c = n_samples / (n_classes * n_c)   -- sklearn's formula
+# "sqrt_balanced" : the square root of that.  Milder: it still favours the rare
+#                   classes but by ~32x rather than ~1000x, which is worth
+#                   comparing if training turns out unstable.
+CLASS_WEIGHT_SCHEME = "balanced"
+
+# An optional ceiling on any single weight, e.g. 100.0.  None = no cap.
+CLASS_WEIGHT_MAX = None
+
+# Rescale so the MEAN PER-SAMPLE weight is 1.  This leaves the relative weights
+# untouched and only fixes the overall scale, so the effective learning rate does
+# not change when the scheme does.
+NORMALISE_WEIGHTS = True
+
+# The inner validation split Step 10 uses for early stopping.  It is carved out
+# of the training set here, and the class weights are computed from the FIT part
+# only -- never from the validation part, or the early-stopping signal would be
+# contaminated by the thing it is meant to judge.
+CLF_VAL_SIZE = 0.10
+
+# False = if the Step 9 outputs already exist, load them instead of recomputing.
+OVERWRITE_STEP9 = False
+
+STEP9_FILES = {
+    "Z_fit": "Z_fit.csv",
+    "y_fit": "y_fit.csv",
+    "Z_val": "Z_val.csv",
+    "y_val": "y_val.csv",
+    "fit_sample_weights": "fit_sample_weights.csv",
+    "class_weights": "class_weights.json",
+    "report": "imbalance_report.csv",
+    "fit_counts_chart": "fit_class_counts.png",
+    "weights_chart": "class_weights.png",
+}
+
+
+# ===========================================================================
+# STEP 10 -- the proposed hybrid CNN-LSTM  /  STEP 11 -- evaluation
+# ===========================================================================
+# Input:  Step 8's Z matrices, Step 9's fit/validation split and class weights.
+# Output: STEP10_OUTPUT_DIR (the trained model) and STEP11_OUTPUT_DIR (the test
+#         metrics), both created if missing.
+STEP10_OUTPUT_DIR = OUTPUTS_DIR / "step10"
+STEP11_OUTPUT_DIR = OUTPUTS_DIR / "step11"
+
+# ---------------------------------------------------------------------------
+# HOW A FLOW IS ARRANGED FOR THE NETWORK -- read this before quoting a result
+# ---------------------------------------------------------------------------
+# "feature_seq" (default)
+#   Each flow becomes a tensor of shape (AE_LATENT_DIM, 1): the 15 autoencoder
+#   features laid out as 15 "steps" of one channel.  The Conv1D layers learn
+#   local patterns across NEIGHBOURING LATENT FEATURES, and the LSTM then reads
+#   their output feature map as a sequence of learned feature patterns.
+#
+#   This is NOT a time sequence, and the model is not doing temporal modelling.
+#   Worse, the autoencoder's latent units have NO NATURAL ORDER: which feature
+#   lands at position 3 versus position 11 is an arbitrary consequence of how the
+#   encoder initialised, so "neighbouring" means nothing in particular.  The
+#   arrangement is fixed and reproducible (the encoder is saved), and the
+#   architecture is the one the thesis proposes, so it is implemented as
+#   specified -- but any claim that the CNN-LSTM captures temporal attack
+#   structure needs INPUT_MODE = "time_window", not this.
+#
+# "time_window"
+#   Windows of WINDOW_SIZE consecutive flows, ordered by Timestamp WITHIN one
+#   Source_Capture, labelled by the last flow in the window.  Windows are built
+#   separately inside train and inside test so none ever straddles the split.
+#   The caveat here is different: the Step 5 split was random and stratified, so
+#   consecutive rows on one side were not consecutive in the capture -- there are
+#   gaps, and a "window" spans more wall-clock time than it appears to.
+INPUT_MODE = "feature_seq"
+WINDOW_SIZE = 10
+
+# The architecture the thesis proposes.
+CNN_FILTERS = [64, 64]
+CNN_KERNEL = 3
+CNN_POOL = 2
+LSTM_UNITS = 64
+DROPOUT = 0.3
+DENSE_UNITS = 64
+
+CLF_EPOCHS = 50
+CLF_BATCH_SIZE = 256
+CLF_LR = 1e-3
+CLF_PATIENCE = 8
+
+# Early stopping watches macro-F1 on the validation part, not loss: with a 3849:1
+# imbalance the loss is dominated by the majority class, and a model that quietly
+# stops predicting the rare classes can still improve it.
+EARLY_STOP_METRIC = "val_macro_f1"
+
+# 1 trains once.  Set 3 or 5 to retrain with different seeds and report
+# mean +- std, which is what the rare classes need: with ~5 test rows each, a
+# single run's per-class F1 moves by a lot on one row changing hands.
+N_SEEDS = 1
+
+OVERWRITE_STEP10 = False
+OVERWRITE_STEP11 = False
+
+STEP10_FILES = {
+    "model": "cnn_lstm.keras",
+    "history": "training_history.csv",
+    "model_card": "model_card.json",
+    "architecture": "architecture.csv",
+    "report": "step10_report.csv",
+    "loss_curve": "loss_curve.png",
+    "f1_curve": "val_macro_f1_curve.png",
+}
+
+STEP11_FILES = {
+    "metrics": "metrics.json",
+    "per_class": "per_class_report.csv",
+    "predictions": "predictions.csv",
+    "confusion_counts": "confusion_matrix_counts.csv",
+    "confusion_normalised": "confusion_matrix_rownorm.csv",
+    "duplicate_split": "duplicate_free_comparison.csv",
+    "binary": "binary_view.csv",
+    "report": "step11_report.csv",
+    "confusion_chart": "confusion_matrix.png",
+}
+
+# Declared above, before the Step 5-11 blocks existed.
 DIRS_TO_CREATE.append(STEP5_OUTPUT_DIR)
 DIRS_TO_CREATE.append(STEP6_OUTPUT_DIR)
 DIRS_TO_CREATE.append(STEP7_OUTPUT_DIR)
 DIRS_TO_CREATE.append(STEP8_OUTPUT_DIR)
+DIRS_TO_CREATE.append(STEP9_OUTPUT_DIR)
+DIRS_TO_CREATE.append(STEP10_OUTPUT_DIR)
+DIRS_TO_CREATE.append(STEP11_OUTPUT_DIR)
