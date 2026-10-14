@@ -887,6 +887,75 @@ STEP6_FILES = {
     "funnel": "feature_funnel.png",
 }
 
-# Declared above, before the Step 5 and Step 6 blocks existed.
+
+# ===========================================================================
+# STEP 7 -- autoencoder feature extraction  /  STEP 8 -- transform both sets
+# ===========================================================================
+# Input:  the Step 6 outputs (X_train_selected.csv, X_test_selected.csv, the
+#         labels, and selected_features.json).
+# Output: STEP7_OUTPUT_DIR (the trained autoencoder) and STEP8_OUTPUT_DIR (the
+#         encoded Z matrices), both created if missing.
+#
+# The autoencoder is UNSUPERVISED: it is trained to reconstruct its own input
+# and never sees a label.  The labels appear in Step 7 for exactly one purpose,
+# to STRATIFY the inner split used for early stopping, so the 23-row classes are
+# represented in the validation part instead of landing entirely in the fit part
+# by chance.
+STEP7_OUTPUT_DIR = OUTPUTS_DIR / "step7"      # C:\MSCAD2022\outputs\step7
+STEP8_OUTPUT_DIR = OUTPUTS_DIR / "step8"      # C:\MSCAD2022\outputs\step8
+
+# The framework, picked once and used for Steps 7-8 and 10-12 alike.  See
+# AE_FRAMEWORK_NOTE for why.
+AE_FRAMEWORK = "tensorflow"
+
+# 30 -> 24 -> 15, and the decoder mirrors it back 15 -> 24 -> 30.
+AE_LATENT_DIM = 15
+AE_HIDDEN = [24]
+AE_ACTIVATION = "relu"
+# The Step 5 scaler put every feature into [0, 1], so a sigmoid output can
+# reach every legal value and nothing else.  A linear output would be free to
+# predict -3 or 7, which no input can be.
+AE_OUTPUT_ACT = "sigmoid"
+AE_LOSS = "mse"
+
+AE_EPOCHS = 100
+AE_BATCH_SIZE = 256
+AE_LR = 1e-3
+
+# An inner split of the TRAINING set, for early stopping only.  The Step 5 test
+# set is not involved in Step 7 at all.
+AE_VAL_SIZE = 0.10
+AE_PATIENCE = 10
+
+# False = if the outputs already exist, load them instead of retraining.
+OVERWRITE_STEP7 = False
+OVERWRITE_STEP8 = False
+
+# Z columns are z01 ... z15, zero-padded so they sort correctly as text.
+Z_COLUMN_PREFIX = "z"
+
+STEP7_FILES = {
+    "autoencoder": "autoencoder.keras",          # the full encoder + decoder
+    "encoder": "encoder.keras",                  # the half Step 8 needs
+    "history": "training_history.csv",
+    "ae_config": "ae_config.json",               # hyperparameters + feature order
+    "architecture": "architecture.csv",
+    "per_feature_mse": "per_feature_mse.csv",
+    "report": "step7_report.csv",
+    "loss_curve": "loss_curve.png",
+}
+
+STEP8_FILES = {
+    "Z_train": "Z_train.csv",
+    "Z_test": "Z_test.csv",
+    "y_train": "y_train.csv",                    # copied from Step 6, unchanged
+    "y_test": "y_test.csv",
+    "recon_mse": "reconstruction_mse.csv",
+    "report": "step8_report.csv",
+}
+
+# Declared above, before the Step 5-8 blocks existed.
 DIRS_TO_CREATE.append(STEP5_OUTPUT_DIR)
 DIRS_TO_CREATE.append(STEP6_OUTPUT_DIR)
+DIRS_TO_CREATE.append(STEP7_OUTPUT_DIR)
+DIRS_TO_CREATE.append(STEP8_OUTPUT_DIR)
