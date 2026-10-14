@@ -954,8 +954,73 @@ STEP8_FILES = {
     "report": "step8_report.csv",
 }
 
-# Declared above, before the Step 5-8 blocks existed.
+
+# ===========================================================================
+# STEP 9 -- class imbalance, handled in the TRAINING LOSS only
+# ===========================================================================
+# Input:  the Step 8 outputs (Z_train.csv, y_train.csv).
+# Output: STEP9_OUTPUT_DIR, created if missing.
+#
+# CLASS WEIGHTING ONLY.  No SMOTE, no SMOTE-ENN, no over- or undersampling,
+# and imbalanced-learn is deliberately not a dependency.  Every row that goes in
+# comes out: the weights change how much each row COUNTS in the loss, never how
+# many rows there are.
+#
+# Why weighting and not resampling, on this dataset.  About half the rows share
+# identical feature values once the identifiers are gone -- thousands of scan,
+# flood and brute-force flows genuinely look alike.  SMOTE interpolates between
+# nearest neighbours, so on identical rows it manufactures copies rather than new
+# information, and oversampling before an inner split copies rows across it.
+# Weighting avoids both: it adds no rows at all.
+#
+# The TEST SET IS NEVER TOUCHED by any of this.  Weights are computed from the
+# training rows alone, applied only in the training loss, and the test set is
+# scored exactly as it comes out of Step 8.  Reweighting the test set would make
+# the reported score a different question from the one being asked.
+STEP9_OUTPUT_DIR = OUTPUTS_DIR / "step9"      # C:\MSCAD2022\outputs\step9
+
+# "class_weight" -> weight the loss.  "none" -> every weight is 1.0, which is the
+# honest baseline to compare against.
+IMBALANCE_STRATEGY = "class_weight"
+
+# "balanced"      : w_c = n_samples / (n_classes * n_c)   -- sklearn's formula
+# "sqrt_balanced" : the square root of that.  Milder: it still favours the rare
+#                   classes but by ~32x rather than ~1000x, which is worth
+#                   comparing if training turns out unstable.
+CLASS_WEIGHT_SCHEME = "balanced"
+
+# An optional ceiling on any single weight, e.g. 100.0.  None = no cap.
+CLASS_WEIGHT_MAX = None
+
+# Rescale so the MEAN PER-SAMPLE weight is 1.  This leaves the relative weights
+# untouched and only fixes the overall scale, so the effective learning rate does
+# not change when the scheme does.
+NORMALISE_WEIGHTS = True
+
+# The inner validation split Step 10 uses for early stopping.  It is carved out
+# of the training set here, and the class weights are computed from the FIT part
+# only -- never from the validation part, or the early-stopping signal would be
+# contaminated by the thing it is meant to judge.
+CLF_VAL_SIZE = 0.10
+
+# False = if the Step 9 outputs already exist, load them instead of recomputing.
+OVERWRITE_STEP9 = False
+
+STEP9_FILES = {
+    "Z_fit": "Z_fit.csv",
+    "y_fit": "y_fit.csv",
+    "Z_val": "Z_val.csv",
+    "y_val": "y_val.csv",
+    "fit_sample_weights": "fit_sample_weights.csv",
+    "class_weights": "class_weights.json",
+    "report": "imbalance_report.csv",
+    "fit_counts_chart": "fit_class_counts.png",
+    "weights_chart": "class_weights.png",
+}
+
+# Declared above, before the Step 5-9 blocks existed.
 DIRS_TO_CREATE.append(STEP5_OUTPUT_DIR)
 DIRS_TO_CREATE.append(STEP6_OUTPUT_DIR)
 DIRS_TO_CREATE.append(STEP7_OUTPUT_DIR)
 DIRS_TO_CREATE.append(STEP8_OUTPUT_DIR)
+DIRS_TO_CREATE.append(STEP9_OUTPUT_DIR)
