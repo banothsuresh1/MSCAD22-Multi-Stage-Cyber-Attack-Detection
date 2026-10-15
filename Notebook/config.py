@@ -1427,3 +1427,60 @@ BASELINE4_FILES = {
     "confusion_rownorm": "confusion_matrix_rownorm.csv",
     "predictions": "predictions.csv",
 }
+
+
+# ---------------- Step 12 addendum - Baseline 5 ----------------
+# APPENDED.  Nothing above this line was changed.
+#
+# Baseline 5: MI (top 30) -> AE (30 -> 15) -> hybrid CNN-LSTM.
+#
+# The proposed model selects its 30 features with three signals -- mutual
+# information, a Pearson redundancy filter and permutation importance.
+# Baseline 5 keeps everything else identical and selects with MI alone, so the
+# difference between the two rows is what the Pearson filter and the
+# permutation importance bought.  If the two feature lists come out identical
+# the run STOPS and says so: there would be nothing to compare.
+BASELINE5_NAME = "baseline5"
+BASELINE5_SPEC = dict(name="baseline5", feature_source="mi_top30",
+                      use_ae=True, use_pca=False, model_type="cnn_lstm")
+BASELINE5_TOP_K = 30
+BASELINE5_OUTPUT_DIR = STEP12_OUTPUT_DIR / "baseline5"
+
+# False = a finished Baseline 5 is read back from disk instead of retrained.
+OVERWRITE_BASELINE5 = False
+
+# Baseline 5 is deliberately NOT added to EXPERIMENTS: that list is what
+# experiments.run_step12() iterates and what Steps 13 and 14 address by name.
+BASELINE5_FILES = {
+    "mi_scores": "mi_scores.csv",
+    "selected": "selected_features_mi30.csv",
+    "overlap": "feature_overlap.csv",
+    "encoder": "encoder.keras",
+    "ae_config": "ae_config.json",
+    "ae_history": "ae_history.csv",
+    "model": "model.keras",
+    "history": "history.csv",
+    "metrics": "metrics.json",
+    "per_class": "per_class_report.csv",
+    "confusion_counts": "confusion_matrix_counts.csv",
+    "confusion_rownorm": "confusion_matrix_rownorm.csv",
+    "predictions": "predictions.csv",
+}
+
+# Written beside the Step 12 files, never over them.
+STEP12C_FILES = {
+    "comparison": "comparison_table_6configs.csv",
+    "comparison_marked": "marked_comparison_table_6configs.csv",
+    "per_class_full": "per_class_f1_full_6configs.csv",
+    "per_class_free": "per_class_f1_duplicate_free_6configs.csv",
+    "head_to_head": "proposed_vs_baseline5_6configs.csv",
+    "per_class_diff": "proposed_vs_baseline5_per_class_6configs.csv",
+    "consistency": "consistency_checks_6configs.csv",
+    "summary": "summary_6configs.md",
+    "report": "step12_baseline5_report_6configs.csv",
+    "chart_metrics": "comparison_metrics_6configs.png",
+    "chart_metrics_free": "comparison_metrics_duplicate_free_6configs.png",
+    "chart_per_class": "per_class_f1_heatmap_6configs.png",
+    "chart_confusion": "confusion_matrices_6configs.png",
+    "chart_head_to_head": "proposed_vs_baseline5_per_class_6configs.png",
+}
