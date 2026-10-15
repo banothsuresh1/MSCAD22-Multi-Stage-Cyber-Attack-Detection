@@ -1242,3 +1242,112 @@ STEP13_FILES = {
 }
 
 DIRS_TO_CREATE.append(STEP13_OUTPUT_DIR)
+
+
+# ---------------- Step 14 - Explainability ----------------
+# APPENDED for Step 14.  Nothing above this line was changed.
+#
+# Step 13 produces a number; an analyst needs a reason.  This step turns each
+# alert into an evidence report: which input features moved each model, how the
+# adaptive fusion combined them into R(x), how confident that evidence is, and
+# what to check next.
+#
+# Nothing here changes a Step 13 decision.  The models, the encoders, the
+# fusion weights and tau are all fixed; Step 14 only reads them.
+STEP14_OUTPUT_DIR = OUTPUTS_DIR / "step14"
+
+# --- Integrated Gradients -------------------------------------------------
+# IG_i(x) = (x_i - x'_i) * integral_0^1 dF(x' + a(x - x'))/dx_i da, evaluated
+# with the trapezoidal rule over IG_STEPS intervals.  64 is the usual working
+# value: completeness is checked per flow, so the choice is verified rather
+# than assumed.
+IG_STEPS = 64
+IG_BASELINE = "benign_median"      # "benign_median" | "zeros" | "train_mean"
+IG_BATCH_SIZE = 256
+EXPLAIN_OTHER_MODELS = True        # attribute all three fused models, not just one
+
+# How many test flows to explain per FUSED class.  A class with fewer rows than
+# this contributes all of them, so the rare classes are never dropped.
+EXPLAIN_SAMPLE_PER_CLASS = 200
+EXPLAIN_RANDOM_STATE = RANDOM_STATE
+TOP_K_FEATURES = 5
+
+# --- checking the explanations -------------------------------------------
+COMPLETENESS_TOL = 0.05            # relative error allowed in sum IG = F(x) - F(x')
+STABILITY_NOISE_STD = 0.01         # Gaussian noise added to scaled features
+STABILITY_N_REPEATS = 5
+PERTURB_MODE = "baseline_replace"  # x_i := x'_i, one feature at a time
+
+# --- the decision bands ---------------------------------------------------
+# tau comes from Step 13 and is NOT recomputed.  tau_s is the lower edge of a
+# "suspicious" band, chosen on the Step 9 VALIDATION split as the lowest risk
+# threshold that still catches SUSPICIOUS_RECALL_TARGET of the attacks there.
+SUSPICIOUS_BAND = True
+SUSPICIOUS_RECALL_TARGET = 0.99
+
+# --- the confidence column ------------------------------------------------
+# High   = fused max probability >= CONF_HIGH_PROB AND all models agree
+#          AND the IG completeness check passed
+# Medium = fused max probability >= CONF_MEDIUM_PROB OR a majority agrees
+# Low    = otherwise
+CONF_HIGH_PROB = 0.90
+CONF_MEDIUM_PROB = 0.70
+
+# --- analyst context ------------------------------------------------------
+# Identifiers are CONTEXT ONLY.  They never enter a model: the MSCAD labels
+# were assigned by attacker IP, so a model given Src IP would learn the label.
+SOURCE_CONTEXT = True
+SOURCE_CONTEXT_WINDOW_MIN = 60
+
+# A label-to-tactic lookup, not an inferred attack progression.  A label that
+# is not in this map is reported as "Unmapped" -- never guessed.
+ATTACK_STAGE_MAP = {
+    "Port_Scan": "Reconnaissance (MITRE ATT&CK TA0043)",
+    "Web_Crwling": "Reconnaissance / Discovery",
+    "Brute_Force": "Credential Access (TA0006)",
+    "DoS slowloris": "Impact - Denial of Service (TA0040)",
+    "ICMP_Flood": "Impact - Denial of Service (TA0040)",
+    "Benign": "None",
+    "Normal": "None",
+}
+
+# Suggestions for an analyst to check -- not automated actions, and nothing
+# here is executed by any code in this project.
+ACTION_TEMPLATES = {
+    "Port_Scan": ("Review scanning source {src_ip}; check firewall rules and "
+                  "exposed services on {dst_ip}."),
+    "Web_Crwling": ("Review web access logs for {src_ip} on {dst_ip}; apply rate "
+                    "limiting if unexpected."),
+    "Brute_Force": ("Block or rate-limit {src_ip}; audit authentication logs and "
+                    "reset credentials on {dst_ip}."),
+    "DoS slowloris": ("Apply connection limits/timeouts for {src_ip} on {dst_ip}; "
+                      "monitor service availability."),
+    "ICMP_Flood": ("Rate-limit or filter ICMP from {src_ip} to {dst_ip}; monitor "
+                   "link load."),
+}
+
+# False = a finished Step 14 is read back from disk instead of recomputed.
+OVERWRITE_STEP14 = False
+
+STEP14_FILES = {
+    "evidence": "evidence_records.csv",
+    "explanations": "explanations.csv",
+    "global_importance": "global_feature_importance.csv",
+    "validation": "explanation_validation.csv",
+    "agreement": "model_agreement.csv",
+    "alerts": "alert_explanations.csv",
+    "examples": "example_alert_reports.md",
+    "thresholds": "thresholds_step14.json",
+    "metrics": "explanation_metrics.json",
+    "report": "step14_report.csv",
+    "chart_global": "global_top_features.png",
+    "chart_heatmap": "class_feature_ig_heatmap.png",
+    "chart_signed": "signed_ig_boxplot.png",
+    "chart_scatter": "ig_vs_perturbation.png",
+    "chart_deletion": "deletion_check.png",
+    "chart_contributions": "example_alert_contributions.png",
+    "chart_bands": "risk_bands.png",
+    "chart_temporal": "temporal_attribution.png",   # time_window mode only
+}
+
+DIRS_TO_CREATE.append(STEP14_OUTPUT_DIR)
