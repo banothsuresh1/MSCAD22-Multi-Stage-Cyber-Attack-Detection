@@ -1351,3 +1351,79 @@ STEP14_FILES = {
 }
 
 DIRS_TO_CREATE.append(STEP14_OUTPUT_DIR)
+
+
+# ------- Step 12 (addendum) - Baseline 4: AE -> PCA -> LSTM -------
+# APPENDED.  Nothing above this line was changed.
+#
+# Step 12 is finished and its four configurations are verified; Steps 13 and 14
+# import that module and address those configurations by name.  So Baseline 4
+# is added BESIDE them rather than by editing the list above:
+#
+#   EXPERIMENTS            the four Step 12 configurations, untouched -- this is
+#                          what experiments.run_step12() still iterates
+#   EXPERIMENTS_WITH_PCA   those four plus Baseline 4, which is what the new
+#                          experiments_pca module compares
+#
+# Appending Baseline 4 to EXPERIMENTS itself would be worse than it looks: the
+# Step 12 runner has no PCA step, so it would quietly train an AE -> LSTM under
+# the name "baseline4" -- a second copy of Baseline 2 wearing the wrong label.
+BASELINE4_AE_FEATURES = "all"      # "all" -> the Baseline 1 encoder (all -> 15)
+                                   # "selected30" -> the saved Step 7 encoder
+
+# PCA on the 15-dimensional AE latent space, fitted on the TRAINING rows only.
+#   float in (0, 1) -> keep at least that fraction of the variance
+#   int             -> that many components, and it must be <= the latent width
+PCA_N_COMPONENTS = 0.95
+
+BASELINE4 = {
+    "name": "baseline4_ae_pca_lstm",
+    "label": "B4: AE -> PCA -> LSTM",
+    "feature_source": BASELINE4_AE_FEATURES,
+    "use_ae": True,
+    "use_pca": True,
+    "model_type": "lstm",
+    # the encoder is REUSED, never retrained: from Baseline 1 for "all", from
+    # Step 7 for "selected30"
+    "reuse_step7_10": BASELINE4_AE_FEATURES == "selected30",
+    "reuse_encoder_from": ("baseline1_ae_cnn_lstm"
+                           if BASELINE4_AE_FEATURES == "all" else "step7"),
+}
+
+# The five-configuration comparison.  EXPERIMENTS keeps its four entries.
+EXPERIMENTS_WITH_PCA = EXPERIMENTS + [BASELINE4]
+
+# False = a finished Baseline 4 is read back from disk instead of retrained.
+OVERWRITE_BASELINE4 = False
+
+# Written beside the Step 12 files, never over them: the four-configuration
+# tables stay exactly as Step 12 produced them.
+STEP12B_FILES = {
+    "comparison": "comparison_table_with_baseline4.csv",
+    "comparison_marked": "marked_comparison_table_with_baseline4.csv",
+    "per_class_full": "per_class_f1_full_with_baseline4.csv",
+    "consistency": "consistency_checks_with_baseline4.csv",
+    "summary": "summary_with_baseline4.md",
+    "report": "step12_baseline4_report.csv",
+    "chart_metrics": "comparison_metrics_with_baseline4.png",
+    "chart_metrics_free": "comparison_metrics_duplicate_free_with_baseline4.png",
+    "chart_per_class": "per_class_f1_heatmap_with_baseline4.png",
+    "chart_time": "training_and_inference_time_with_baseline4.png",
+    "chart_confusion": "confusion_matrices_with_baseline4.png",
+}
+
+# Inside step12\baseline4_ae_pca_lstm\
+BASELINE4_FILES = {
+    "model": "model.keras",
+    "encoder": "encoder.keras",
+    "ae_config": "ae_config.json",
+    "pca": "pca.joblib",
+    "pca_variance": "pca_variance.csv",
+    "pca_scree": "pca_scree.png",
+    "history": "history.csv",
+    "metrics": "metrics.json",
+    "per_class": "per_class_report.csv",
+    "confusion_counts": "confusion_matrix_counts.csv",
+    "confusion_rownorm": "confusion_matrix_rownorm.csv",
+    "predictions": "predictions.csv",
+}
