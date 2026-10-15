@@ -1559,3 +1559,53 @@ STEP12_EXPECTED_ROWS = {
 }
 STEP12_EXPECTED_TOLERANCE = 5e-5      # on values rounded to 4 decimals
 STEP12_EXACT_TOLERANCE = 1e-9         # saved metrics.json against rebuilt rows
+
+
+# ---------------- Step 10 Approach 2 - CNN-Attention-LSTM ----------------
+# APPENDED for Approach 2.  Nothing above this line was changed: Approach 1
+# (Step 10 / Step 11) keeps its settings, its folders and its saved results.
+#
+# Approach 2 is Approach 1 with one block added -- additive attention over the
+# LSTM output sequence -- and EVERY other hyperparameter reused from Approach 1
+# (CNN_FILTERS, CNN_KERNEL, CNN_POOL, LSTM_UNITS, DROPOUT, DENSE_UNITS,
+# CLF_EPOCHS, CLF_BATCH_SIZE, CLF_LR, CLF_PATIENCE, EARLY_STOP_METRIC,
+# RANDOM_STATE, INPUT_MODE).  That is the whole point: a difference between the
+# two rows has one cause.
+STEP10B_OUTPUT_DIR = OUTPUTS_DIR / "step10_attention"
+STEP11B_OUTPUT_DIR = OUTPUTS_DIR / "step11_attention"
+
+# The width of the attention scoring layer: e_t = v^T tanh(W h_t + b), with
+# W mapping LSTM_UNITS -> ATTN_UNITS.
+ATTN_UNITS = 64
+
+# False = a finished Approach 2 is loaded from disk instead of retrained.
+OVERWRITE_STEP10B = False
+
+STEP10B_FILES = {
+    "model": "cnn_attention_lstm.keras",
+    "history": "training_history.csv",
+    "model_card": "model_card.json",
+    "architecture": "architecture.csv",
+    "loss_curve": "loss_curve.png",
+    "macro_f1_curve": "val_macro_f1_curve.png",
+    "report": "step10_attention_report.csv",
+}
+
+STEP11B_FILES = {
+    "metrics": "metrics.json",
+    "per_class": "per_class_report.csv",
+    "confusion_counts": "confusion_matrix_counts.csv",
+    "confusion_rownorm": "confusion_matrix_rownorm.csv",
+    "predictions": "predictions.csv",
+    "attention": "attention_weights_summary.csv",
+    "attention_per_class": "attention_weights_per_class.csv",
+    "selection": "approach_selection.json",
+    "comparison": "approach1_vs_approach2.csv",
+    "per_class_diff": "approach1_vs_approach2_per_class.csv",
+    "report": "step11_attention_report.csv",
+    "chart_attention": "attention_heatmap.png",
+    "chart_comparison": "approach1_vs_approach2.png",
+    "chart_confusion": "approach1_vs_approach2_confusion.png",
+}
+
+DIRS_TO_CREATE.extend([STEP10B_OUTPUT_DIR, STEP11B_OUTPUT_DIR])
