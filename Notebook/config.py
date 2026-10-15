@@ -1484,3 +1484,78 @@ STEP12C_FILES = {
     "chart_confusion": "confusion_matrices_6configs.png",
     "chart_head_to_head": "proposed_vs_baseline5_per_class_6configs.png",
 }
+
+
+# ---------------- Step 12 integration - display order and full tables ------
+# APPENDED for the Step 12 integration.  Nothing above this line was changed:
+# EXPERIMENTS keeps its four entries and every INTERNAL key ("proposed",
+# "baseline2_ae_lstm", "baseline3_cnn_lstm", ...) is untouched, because Step 13
+# validates FUSION_MODELS against them.  Only DISPLAY labels are defined here.
+#
+# One order, used by every Step 12 table, chart, legend and confusion grid.
+# Approach 2 is row 2 from the start: before it is trained its row reads
+# "not yet trained - run 10.2" and is excluded from best-value marking, so the
+# order never changes once it exists.
+APPROACH2_KEY = "approach2_attention"
+
+STEP12_DISPLAY_ORDER = [
+    ("proposed", "Approach 1: FS -> AE -> CNN-LSTM"),
+    (APPROACH2_KEY, "Approach 2: FS -> AE -> CNN-Attention-LSTM"),
+    ("baseline1_ae_cnn_lstm", "B1: AE -> CNN-LSTM (no selection)"),
+    ("baseline2_ae_lstm", "B2: AE -> LSTM (no CNN)"),
+    ("baseline3_cnn_lstm", "B3: CNN-LSTM (no AE)"),
+    ("baseline4_ae_pca_lstm", "B4: AE -> PCA -> LSTM"),
+    ("baseline5", "B5: MI-only top 30 -> AE -> CNN-LSTM"),
+]
+
+# What each configuration isolates, for the 12.1 table.
+STEP12_ISOLATES = {
+    "proposed": "the proposed pipeline (reference)",
+    APPROACH2_KEY: "what attention over the CNN feature map adds",
+    "baseline1_ae_cnn_lstm": "what the feature selection buys",
+    "baseline2_ae_lstm": "what the CNN front end buys",
+    "baseline3_cnn_lstm": "what the autoencoder buys",
+    "baseline4_ae_pca_lstm": "linear PCA in place of the CNN",
+    "baseline5": "MI alone in place of the fused MI + Pearson + PI selection",
+}
+
+# The text shown in a row whose model has not been trained yet.
+NOT_TRAINED_TEXT = "not yet trained - run 10.2"
+
+# Written beside the existing Step 12 files, never over them.  (You asked for
+# `per_class_f1_full.csv`; Step 12 already uses that name for its four-row
+# table, so the all-configuration version is `per_class_f1_table_full.csv`.)
+STEP12_FULL_FILES = {
+    "comparison": "comparison_table_full.csv",
+    "comparison_marked": "marked_comparison_table_full.csv",
+    "per_class": "per_class_f1_table_full.csv",
+    "per_class_free": "per_class_f1_table_duplicate_free_full.csv",
+    "zero_recall": "zero_recall_diagnostic_full.csv",
+    "head_to_head": "head_to_head_full.csv",
+    "unchanged_check": "existing_rows_unchanged_full.csv",
+    "summary": "summary_full.md",
+    "report": "step12_full_report.csv",
+    "chart_metrics": "comparison_metrics_full.png",
+    "chart_metrics_free": "comparison_metrics_duplicate_free_full.png",
+    "chart_per_class": "per_class_f1_heatmap_full.png",
+    "chart_time": "training_and_inference_time_full.png",
+    "chart_confusion": "confusion_matrices_full.png",
+}
+
+# The readable cross-check from the thesis write-up: every one of these rows
+# must still produce these numbers after the integration (4 decimals, 5e-5).
+# A key that is absent from the saved results is reported as skipped, never
+# silently passed.
+STEP12_EXPECTED_ROWS = {
+    "proposed": {"accuracy": 0.9896, "f1_macro": 0.7170, "g_mean": 0.7505},
+    "baseline1_ae_cnn_lstm": {"accuracy": 0.9859, "f1_macro": 0.6848,
+                              "g_mean": 0.7388},
+    "baseline2_ae_lstm": {"accuracy": 0.9580, "f1_macro": 0.5101,
+                          "g_mean": 0.0000},
+    "baseline3_cnn_lstm": {"accuracy": 0.9689, "f1_macro": 0.5249,
+                           "g_mean": 0.0000},
+    "baseline4_ae_pca_lstm": {"accuracy": 0.9851, "f1_macro": 0.5735,
+                              "g_mean": 0.6384},
+}
+STEP12_EXPECTED_TOLERANCE = 5e-5      # on values rounded to 4 decimals
+STEP12_EXACT_TOLERANCE = 1e-9         # saved metrics.json against rebuilt rows
