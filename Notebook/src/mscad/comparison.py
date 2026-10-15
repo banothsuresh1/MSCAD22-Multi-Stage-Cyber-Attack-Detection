@@ -126,6 +126,101 @@ def which_step_produces(key: str) -> str:
 
 
 # ===========================================================================
+# 12.2  THE RUN CELLS, WITHOUT THE TABLES 12.1 AND 12.5 NOW OWN
+# ===========================================================================
+# `experiments.run_step12`, `experiments_pca.run_step12_with_baseline4` and
+# `experiments_baseline5.run_baseline5_comparison` each end by printing a
+# configuration table and a comparison table of their own four, five or six
+# rows, under the old `EXPERIMENTS` labels ("Proposed: ...").  12.1 and 12.5
+# print both in full -- all seven configurations, in `STEP12_DISPLAY_ORDER` --
+# so those versions are strictly contained in these and only make a reader
+# stitch rows together again.
+#
+# Nothing here changes a run function: each already takes `verbose`, so the
+# tables are turned off through its own flag and one status line per
+# configuration is printed instead.  What is computed, saved and returned is
+# identical -- `load_step12_quiet` returns the run function's own dict.
+def display_label(key: str) -> str:
+    """The 12.1/12.5 label for a configuration, whatever its spec calls it.
+
+    The specs in `config.EXPERIMENTS` still carry the labels Step 12 was
+    written with, and they are quoted inside files already on disk, so they
+    are left alone; display reads `STEP12_DISPLAY_ORDER` instead, which is
+    where every other Step 12 table gets its labels.
+    """
+    for name, label in config.STEP12_DISPLAY_ORDER:
+        if name == key:
+            return label
+    return key
+
+
+def run_status_lines(out: dict[str, Any] | None,
+                     keys: Sequence[str] | None = None) -> list[str]:
+    """One short line per configuration, in place of a table.
+
+    `keys` defaults to the four `config.EXPERIMENTS` names, which is what
+    `experiments.run_step12` covers; the Baseline 4 and Baseline 5 cells pass
+    their own longer lists.
+
+    The status comes from the run function's own return value: a run it trained
+    says `written`, one it read back says `loaded_existing`.  A run function
+    that took its load-from-disk path returns no per-configuration runs at all,
+    so the saved `metrics.json` is checked instead -- a line never claims a
+    result that is not on disk.
+    """
+    out = out or {}
+    keys = ([spec["name"] for spec in config.EXPERIMENTS] if keys is None
+            else list(keys))
+
+    statuses: dict[str, str] = {}
+    for run in (out.get("runs") or []):
+        if not isinstance(run, dict):
+            continue
+        name = (run.get("spec") or {}).get("name")
+        if name:
+            statuses[str(name)] = str(run.get("status") or "")
+
+    labels = {key: display_label(key) for key in keys}
+    width = max([len(label) for label in labels.values()] or [0])
+
+    lines = []
+    for key in keys:
+        status = statuses.get(key)
+        if status == "written":
+            what = "trained and saved"
+        elif status == "loaded_existing":
+            what = "loaded (saved result)"
+        else:
+            path = result_path(key)
+            what = ("loaded (saved result)"
+                    if path is not None and path.exists()
+                    else "not available -- run %s" % which_step_produces(key))
+        label = labels[key]
+        lines.append("%s %s %s" % (label, "." * (width - len(label) + 3), what))
+    return lines
+
+
+def load_step12_quiet(runner: Any = None, keys: Sequence[str] | None = None,
+                      show: bool = True, **kwargs: Any) -> dict[str, Any]:
+    """Run or load a Step 12 section with its superseded tables suppressed.
+
+    `runner` is the run function to call and defaults to
+    `experiments.run_step12`; it is called with `verbose=False` and every other
+    argument passed straight through, so it does exactly the work it always
+    did -- trains what is missing, reads back what is finished, writes the same
+    files -- and its own dict is returned unchanged.
+
+    Returns that dict; prints the status lines unless `show=False`.
+    """
+    runner = xp.run_step12 if runner is None else runner
+    out = runner(verbose=False, **kwargs)
+    if show:
+        for line in run_status_lines(out, keys=keys):
+            print(line)
+    return out
+
+
+# ===========================================================================
 # 12.5  THE FULL COMPARISON TABLE
 # ===========================================================================
 def _row_from_metrics(label: str, metrics: dict[str, Any]) -> dict[str, Any]:
