@@ -24,3 +24,6 @@ Notebook/data/
 # --- capture files (never belong in git) ----------------------------------
 *.pcap
 *.pcapng
+
+# Jupyter autosaves -- never part of the thesis record
+.ipynb_checkpoints/
