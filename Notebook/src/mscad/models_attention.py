@@ -80,24 +80,47 @@ class AttentionError(Exception):
 _ATTENTION_CLASS = None
 
 
+def _serializable(keras):
+    """`register_keras_serializable`, wherever this Keras keeps it.
+
+    Keras 3 exposes it on `keras.saving`; Keras 2 exposes it on `keras.utils`
+    (and 2.13+ on both).  Looked up rather than assumed, because the whole
+    point of this module's rewrite is that it runs on either.
+    """
+    register = getattr(getattr(keras, "saving", None),
+                       "register_keras_serializable", None)
+    if register is None:
+        register = getattr(getattr(keras, "utils", None),
+                           "register_keras_serializable", None)
+    if register is None:                       # pragma: no cover - very old Keras
+        return lambda cls: cls                 # custom_objects still carries it
+    return register(package="mscad")
+
+
 def _attention_class():
     """Build the layer class lazily, so this module imports without Keras.
 
     Cached, and that matters for more than speed: the
-    `@register_keras_serializable` decorator below only runs when this function
+    `register_keras_serializable` decorator below only runs when this function
     is first called.  A process that LOADS a saved Approach 2 model without
     building one first -- which is exactly what the resumable notebook path
     does -- would otherwise meet "Could not locate class 'AdditiveAttention'".
     `register_attention()` is the public way to make sure it has run.
+
+    Keras 2 and Keras 3 both work.  The arithmetic below is written in
+    TensorFlow ops rather than the `ops` namespace, which exists only in
+    Keras 3: this project pins TensorFlow (AE_FRAMEWORK = "tensorflow") and
+    Steps 7-13 have models saved by the installed version, so the layer has to
+    meet the environment where it is rather than ask it to move.
     """
     global _ATTENTION_CLASS
     if _ATTENTION_CLASS is not None:
         return _ATTENTION_CLASS
 
     keras = md._keras()
-    from keras import ops
+    import tensorflow as tf
 
-    @keras.saving.register_keras_serializable(package="mscad")
+    @_serializable(keras)
     class AdditiveAttention(keras.layers.Layer):
         r"""Bahdanau-style additive attention over a sequence.
 
@@ -126,14 +149,27 @@ def _attention_class():
             super().build(input_shape)
 
         def scores(self, inputs):
-            """alpha_t for every position: non-negative and summing to 1."""
-            hidden = ops.tanh(ops.matmul(inputs, self.W) + self.b)
-            energy = ops.squeeze(ops.matmul(hidden, self.v), axis=-1)
-            return ops.softmax(energy, axis=-1)
+            """alpha_t for every position: non-negative and summing to 1.
+
+            `tf.tensordot` rather than `tf.matmul`: the input is (batch, T, F)
+            and W is (F, units), and matmul does not broadcast a rank-2 operand
+            across a rank-3 one.  Contracting the last axis is what the formula
+            means anyway.
+            """
+            # e_t = v^T tanh(W h_t + b)
+            hidden = tf.tanh(tf.tensordot(inputs, self.W, axes=[[2], [0]])
+                             + self.b)                       # (batch, T, units)
+            energy = tf.squeeze(tf.tensordot(hidden, self.v, axes=[[2], [0]]),
+                                axis=-1)                     # (batch, T)
+            # softmax over the POSITIONS, which is axis -1 of a (batch, T)
+            # tensor -- over the batch instead would be meaningless
+            return tf.nn.softmax(energy, axis=-1)
 
         def call(self, inputs):
             alpha = self.scores(inputs)
-            return ops.sum(inputs * ops.expand_dims(alpha, axis=-1), axis=1)
+            # c = sum_t alpha_t h_t
+            return tf.reduce_sum(inputs * tf.expand_dims(alpha, axis=-1),
+                                 axis=1)
 
         def compute_output_shape(self, input_shape):
             return (input_shape[0], input_shape[-1])
