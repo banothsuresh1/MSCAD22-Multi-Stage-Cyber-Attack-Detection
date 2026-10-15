@@ -1683,3 +1683,87 @@ STEP13ALL_FILES = {
 }
 
 DIRS_TO_CREATE.append(STEP13ALL_OUTPUT_DIR)
+
+
+# ---------------- Step 14 addendum - XAI across all models ----------------
+# APPENDED.  Nothing above this line was changed.
+#
+# Step 14 explains the three-model fusion (FUSION_MODELS).  This addendum
+# explains EVERY approach and baseline on its own named input features, puts
+# their explanations side by side, and explains each of the three fusion
+# variants F3 (Step 13), FALL and FSEL (13.8).
+#
+# Nothing is retrained and nothing in step14\ is touched: the models, encoders,
+# the Baseline 4 PCA, the fusion weights and every threshold are loaded.
+STEP14ALL_OUTPUT_DIR = OUTPUTS_DIR / "step14_all"
+
+# The configurations to explain, by their internal keys -- the keys of
+# STEP12_DISPLAY_ORDER, in that order.  Built from it rather than retyped, so
+# the two lists cannot drift apart.
+XAI_ALL_MODELS = [key for key, _label in STEP12_DISPLAY_ORDER]
+
+# Which fusion variant the 14.9.5 alert reports explain.
+#   "auto"  the variant with the best VALIDATION macro-F1 among those available
+#   "F3"    the Step 13 three-model fusion
+#   "FALL"  13.8's fusion over every available model
+#   "FSEL"  13.8's fusion over the validation-chosen subset
+ALERT_FUSION_VARIANT = "auto"
+
+# One colour per model, in display order, used by every 14.9 chart so a model
+# keeps its colour from one figure to the next.  The first five are the
+# project's existing series hues; the last two extend them to seven.  Checked
+# for colour-blind separation and the chroma floor against the chart surface
+# (worst adjacent pair dE 9.1 protan); three sit below 3:1 contrast, so every
+# chart that uses them also carries direct labels or a legend.
+MODEL_COLOURS = dict(zip(XAI_ALL_MODELS, [
+    "#2a78d6",   # Approach 1
+    "#eb6834",   # Approach 2
+    "#1baf7a",   # B1
+    "#eda100",   # B2
+    "#e87ba4",   # B3
+    "#8a63d2",   # B4
+    "#00a9b5",   # B5
+]))
+
+# How many features a cross-model top-K table and the overlap measure use.
+XAI_TOP_FEATURES = 10
+
+# False = a finished addendum is read back from disk instead of recomputed.
+OVERWRITE_STEP14ALL = False
+
+# Everything else is reused from the Step 14 block above, unchanged: IG_STEPS,
+# IG_BASELINE, IG_BATCH_SIZE, EXPLAIN_SAMPLE_PER_CLASS, TOP_K_FEATURES,
+# COMPLETENESS_TOL, STABILITY_NOISE_STD, STABILITY_N_REPEATS, PERTURB_MODE,
+# SUSPICIOUS_BAND, SUSPICIOUS_RECALL_TARGET, CONF_HIGH_PROB, CONF_MEDIUM_PROB,
+# SOURCE_CONTEXT, ATTACK_STAGE_MAP and ACTION_TEMPLATES.
+
+STEP14ALL_FILES = {
+    "composed_checks": "composed_model_checks.csv",
+    "ig_baselines": "ig_baselines_all.csv",
+    "explanations": "explanations_all.csv",
+    "global_importance": "global_importance_all.csv",
+    "quality": "explanation_quality_all.csv",
+    "agreement": "model_explanation_agreement.csv",
+    "consensus": "consensus_features_all.csv",
+    "attention": "attention_summary_approach2.csv",
+    "contributions": "fusion_contributions_all.csv",
+    "variants": "fusion_variant_comparison.csv",
+    "dominant": "dominant_model_per_variant.csv",
+    "disagreement": "fusion_variant_disagreement.csv",
+    "example_rows": "example_alert_report_rows.csv",
+    "alerts": "alert_explanations_all.csv",
+    "examples": "example_alert_reports_all.md",
+    "metrics": "explanation_metrics_all.json",
+    "verification": "verification_all.csv",
+    "summary": "summary_all.md",
+    "report": "step14_all_report.csv",
+    "chart_global": "global_importance_per_model.png",
+    "chart_feature_heatmap": "feature_by_model_heatmap.png",
+    "chart_agreement": "model_agreement_heatmap.png",
+    "chart_quality": "explanation_quality_bars.png",
+    "chart_deletion": "deletion_check_per_model.png",
+    "chart_dominant": "dominant_model_per_variant.png",
+    "chart_attention": "attention_heatmap_approach2.png",
+}
+
+DIRS_TO_CREATE.append(STEP14ALL_OUTPUT_DIR)
