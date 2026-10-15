@@ -1609,3 +1609,77 @@ STEP11B_FILES = {
 }
 
 DIRS_TO_CREATE.extend([STEP10B_OUTPUT_DIR, STEP11B_OUTPUT_DIR])
+
+
+# ---------------- Step 13 addendum - fusion across all models ----------------
+# APPENDED.  Nothing above this line was changed.
+#
+# Step 13 fuses three models (FUSION_MODELS, unchanged above: Approach 1, B2,
+# B3).  This addendum asks the next question without disturbing that result:
+# what happens when EVERY approach and baseline that exists on disk is offered
+# to the same adaptive fusion, and what happens when a subset is chosen on the
+# validation split instead of all of them?
+#
+# Nothing here is retrained.  Every model is loaded from the folder its own step
+# wrote, and a model that has not been trained is skipped by name rather than
+# filled in.
+STEP13ALL_OUTPUT_DIR = OUTPUTS_DIR / "step13_all"
+
+# The configurations to offer the fusion, by their INTERNAL keys.  These are the
+# keys of STEP12_DISPLAY_ORDER, named through the same constants the rest of the
+# project uses so a rename cannot leave this list behind:
+#   APPROACH2_KEY  == "approach2_attention"   (Step 10.2 / 11.3, not EXPERIMENTS)
+#   BASELINE5_NAME == "baseline5"             (the Step 12 addendum)
+# fusion_all.model_keys() verifies every entry against STEP12_DISPLAY_ORDER at
+# run time rather than trusting this list.
+FUSION_ALL_MODELS = [
+    "proposed",
+    APPROACH2_KEY,
+    "baseline1_ae_cnn_lstm",
+    "baseline2_ae_lstm",
+    "baseline3_cnn_lstm",
+    "baseline4_ae_pca_lstm",
+    BASELINE5_NAME,
+]
+
+# How the FSEL subset is chosen.  "greedy_forward" starts from the best single
+# model and adds the model that most improves the adaptive fusion's VALIDATION
+# score; "none" skips the subset variant entirely.
+SUBSET_SELECTION = "greedy_forward"     # or "none"
+SUBSET_MAX_MODELS = 4
+SUBSET_METRIC = "macro_f1"              # or "g_mean" -- a VALIDATION metric
+
+# False = a finished addendum is read back from disk instead of recomputed.
+OVERWRITE_STEP13ALL = False
+
+# Every fusion setting is reused from the Step 13 block above -- WEIGHT_MODE,
+# WEIGHT_TEMPERATURE, SHRINKAGE_K, CONFIDENCE_TERM, CONTEXT_MODE,
+# RELIABILITY_METRIC, THRESHOLD_RULE, TARGET_FPR, EPSILON -- so FALL and FSEL
+# differ from the Step 13 fusion only in which models they are given.
+
+# Written in their own folder: no Step 13 file is touched.
+STEP13ALL_FILES = {
+    "availability": "model_availability.csv",
+    "disagreement": "diversity_disagreement.csv",
+    "risk_corr": "diversity_risk_corr.csv",
+    "selection_path": "subset_selection_path.csv",
+    "reliability": "reliability_table_all.csv",
+    "thresholds": "thresholds_all.json",
+    "fused_predictions": "fused_predictions_all.csv",
+    "comparison": "comparison_table_all.csv",
+    "comparison_marked": "marked_comparison_table_all.csv",
+    "per_class": "per_class_f1_all.csv",
+    "per_class_free": "per_class_f1_duplicate_free_all.csv",
+    "weights_all": "mean_weight_per_class_all.csv",
+    "weights_subset": "mean_weight_per_class_subset.csv",
+    "metrics": "metrics_all.json",
+    "summary": "summary_all.md",
+    "report": "step13_all_report.csv",
+    "chart_metrics": "comparison_bars_all.png",
+    "chart_metrics_free": "comparison_bars_duplicate_free_all.png",
+    "chart_weights_all": "mean_weight_per_class_all.png",
+    "chart_weights_subset": "mean_weight_per_class_subset.png",
+    "chart_diversity": "diversity_heatmap.png",
+}
+
+DIRS_TO_CREATE.append(STEP13ALL_OUTPUT_DIR)
