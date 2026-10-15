@@ -10,7 +10,7 @@ or written.
 """
 
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import numpy as np
 import pandas as pd
@@ -1098,18 +1098,28 @@ def test_is_windows_absolute_detects_drive_letters_on_any_os():
 
 
 def test_usable_output_dir_refuses_a_windows_path_off_windows(monkeypatch):
-    """The actual root cause: Path(r'C:\\x') is RELATIVE on Linux."""
-    monkeypatch.setattr(config.os, "name", "posix")
+    """The actual root cause: Path(r'C:\\x') is RELATIVE on Linux.
+
+    The other operating system is simulated through `config.running_on_windows`,
+    which is the hook the guard actually asks.  It must NOT be simulated by
+    patching `os.name`: that attribute is global, and on Python < 3.12
+    `pathlib.Path(...)` reads it to decide whether to build a WindowsPath or a
+    PosixPath.  Setting it to "posix" on Windows therefore makes EVERY `Path(...)`
+    in the process -- pytest's own internals included -- raise
+    `NotImplementedError: cannot instantiate 'PosixPath' on your system`, which
+    crashed the whole run with INTERNALERROR rather than failing one test.
+    """
+    monkeypatch.setattr(config, "running_on_windows", lambda: False)
     assert config.usable_output_dir(r"C:\MSCAD2022\outputs") is None
     assert config.usable_output_dir("/tmp/fine") == Path("/tmp/fine")
 
-    monkeypatch.setattr(config.os, "name", "nt")
+    monkeypatch.setattr(config, "running_on_windows", lambda: True)
     assert config.usable_output_dir(r"C:\MSCAD2022\outputs") is not None
 
 
 def test_prepare_output_dir_creates_nothing_for_a_windows_path(tmp_path, monkeypatch, capsys,
                                                                assert_no_leaked_output):
-    monkeypatch.setattr(config.os, "name", "posix")
+    monkeypatch.setattr(config, "running_on_windows", lambda: False)
     monkeypatch.chdir(tmp_path)                      # so any mistake lands here
 
     folder = dl.prepare_output_dir(r"C:\MSCAD2022\outputs\step3", "the merged dataset")
@@ -1122,10 +1132,15 @@ def test_prepare_output_dir_creates_nothing_for_a_windows_path(tmp_path, monkeyp
 
 def test_save_merged_refuses_rather_than_making_a_junk_folder(tmp_path, monkeypatch, capsys,
                                                               assert_no_leaked_output):
-    monkeypatch.setattr(config, "STEP3_OUTPUT_DIR", Path(r"C:\MSCAD2022\outputs\step3"))
+    # PureWindowsPath, not Path: a pure class carries the drive letter on every
+    # operating system and has no mkdir/open at all, so if the guard ever
+    # regressed on Windows this test would raise instead of writing into the
+    # real C:\MSCAD2022.
+    monkeypatch.setattr(config, "STEP3_OUTPUT_DIR",
+                        PureWindowsPath(r"C:\MSCAD2022\outputs\step3"))
     monkeypatch.setattr(config, "MERGED_CSV",
-                        Path(r"C:\MSCAD2022\outputs\step3\MSCAD_merged.csv"))
-    monkeypatch.setattr(config.os, "name", "posix")
+                        PureWindowsPath(r"C:\MSCAD2022\outputs\step3\MSCAD_merged.csv"))
+    monkeypatch.setattr(config, "running_on_windows", lambda: False)
     monkeypatch.chdir(tmp_path)
 
     result = dl.save_merged(fake_flow_frame(3), verbose=True)
@@ -1139,8 +1154,9 @@ def test_save_merged_refuses_rather_than_making_a_junk_folder(tmp_path, monkeypa
 def test_every_writing_helper_is_guarded(tmp_path, monkeypatch, capsys,
                                          assert_no_leaked_output):
     """plot, step 3 reports and the Kaggle comparison all skip, none create."""
-    monkeypatch.setattr(config, "STEP3_OUTPUT_DIR", Path(r"C:\MSCAD2022\outputs\step3"))
-    monkeypatch.setattr(config.os, "name", "posix")
+    monkeypatch.setattr(config, "STEP3_OUTPUT_DIR",
+                        PureWindowsPath(r"C:\MSCAD2022\outputs\step3"))
+    monkeypatch.setattr(config, "running_on_windows", lambda: False)
     monkeypatch.chdir(tmp_path)
     df = pd.DataFrame({config.LABEL_COLUMN: ["Normal"] * 5})
 
