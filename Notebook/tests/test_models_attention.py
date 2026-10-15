@@ -87,19 +87,25 @@ def test_attention_weights_are_a_distribution():
 
 
 def test_the_numpy_weights_match_the_layers_own_computation():
-    """What the heatmap shows must be what the layer computed."""
-    from keras import ops
+    """What the heatmap shows must be what the layer computed.
+
+    TensorFlow rather than `keras`'s own numerical namespace, which exists
+    only in Keras 3; the layer itself is written in TensorFlow ops, so this
+    asks it in the language it speaks on either version.
+    """
+    tf = pytest.importorskip("tensorflow")
 
     model = built_model()
     X = np.random.default_rng(2).uniform(0, 1, (6, N_LATENT, 1)).astype("float32")
     layer = ma.attention_layer(model)
     sequence = keras.Model(model.inputs, layer.input)
 
-    theirs = np.asarray(ops.convert_to_numpy(
-        layer.scores(ops.convert_to_tensor(sequence.predict(X, verbose=0)))),
+    theirs = np.asarray(
+        layer.scores(tf.convert_to_tensor(sequence.predict(X, verbose=0))),
         dtype="float64")
     ours = ma.attention_weights(model, X)
 
+    assert theirs.shape == ours.shape
     assert ours == pytest.approx(theirs, abs=1e-6)
 
 
