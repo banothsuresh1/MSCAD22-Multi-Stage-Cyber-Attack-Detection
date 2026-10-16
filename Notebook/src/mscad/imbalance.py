@@ -586,6 +586,71 @@ def load_step9(verbose: bool = True) -> dict[str, Any]:
     return out
 
 
+def rare_class_report(table: pd.DataFrame, minimum: int | None = None,
+                      verbose: bool = True) -> dict[str, Any]:
+    """Which classes have too few VALIDATION rows to support what depends on them.
+
+    NEW, and additive: it reads the weight table Step 9 already built, writes
+    nothing, and prints only when a class is actually below the threshold.
+
+    Why it matters, and why it is a warning rather than a fix: early stopping
+    monitors the validation macro-F1, which averages the per-class F1 over the
+    validation rows.  A class with one or two validation rows contributes an F1
+    that can only take a few values, so the signal early stopping follows -- and
+    later, the per-class reliability the Step 13 fusion weights a model by -- is
+    estimated from those one or two flows.  Nothing can recover information that
+    is not in the split; the honest response is to say so beside every number
+    that depends on it.
+    """
+    minimum = (int(getattr(config, "RARE_CLASS_VALIDATION_MINIMUM", 5))
+               if minimum is None else int(minimum))
+    rows = table[table["Label"].astype(str) != "TOTAL"].copy()
+    out_rows = []
+    for _i, row in rows.iterrows():
+        validation = int(row["val rows"])
+        out_rows.append({
+            "Label": str(row["Label"]),
+            "fit rows": int(row["fit rows"]),
+            "validation rows": validation,
+            "train rows": int(row["train rows"]),
+            "result": "[OK]" if validation >= minimum else "[WARN]",
+            "note": ("" if validation >= minimum else
+                     "fewer than %d validation rows: early stopping and any "
+                     "later per-class reliability for this class are estimated "
+                     "from %d flow(s)" % (minimum, validation)),
+        })
+    frame = pd.DataFrame(out_rows)
+    rare = frame[frame["result"] == "[WARN]"]
+    note = ""
+    if len(rare):
+        note = (
+            "**Rare-class warning.** %s %s fewer than %d validation rows "
+            "(%s). Early stopping monitors the validation macro-F1, so for "
+            "these classes the signal it follows -- and the per-class "
+            "reliability the Step 13 fusion later weights a model by -- is "
+            "estimated from very few flows. Treat their per-class figures as "
+            "indicative, and read the macro average knowing that these "
+            "classes move it as much as the common ones do."
+            % (", ".join(rare["Label"]),
+               "has" if len(rare) == 1 else "have", minimum,
+               ", ".join("%s: %d" % (r["Label"], r["validation rows"])
+                         for _i, r in rare.iterrows())))
+    if verbose:
+        show_table(frame, all_columns=True,
+                   note="Reading: rows per class in the fit and validation "
+                        "parts of the Step 9 split. A [WARN] means the "
+                        "validation part has fewer than %d rows of that class."
+                        % minimum)
+        if len(rare):
+            print("  [WARN]  %d class(es) below %d validation rows: %s"
+                  % (len(rare), minimum, ", ".join(rare["Label"])))
+        else:
+            print("  [OK]    every class has at least %d validation rows"
+                  % minimum)
+    return {"table": frame, "rare": list(rare["Label"]), "note": note,
+            "minimum": minimum, "ok": not len(rare)}
+
+
 def run_step9(overwrite: bool | None = None, verbose: bool = True) -> dict[str, Any]:
     """STEP 9 end to end: split TRAIN, weight the fit part, save, verify."""
     overwrite = config.OVERWRITE_STEP9 if overwrite is None else overwrite
@@ -616,6 +681,9 @@ def run_step9(overwrite: bool | None = None, verbose: bool = True) -> dict[str, 
     if verbose:
         show_title("Step 9.2 -- class weights from the fit part", level=3)
     table, stats = weight_table(y_train, y_fit, y_val, class_weights, verbose=verbose)
+    if verbose:
+        show_title("Step 9.3 -- rare classes in the validation part", level=3)
+    rare = rare_class_report(table, verbose=verbose)
     report = build_report(class_weights, table, stats, config.IMBALANCE_STRATEGY,
                           len(Z_train))
 
@@ -623,6 +691,7 @@ def run_step9(overwrite: bool | None = None, verbose: bool = True) -> dict[str, 
         "Z_fit": X_fit, "y_fit": y_fit, "Z_val": X_val, "y_val": y_val,
         "class_weights": class_weights, "fit_sample_weights": fit_weights,
         "weight_table": table, "stats": stats, "report": report,
+        "rare_classes": rare,
         "keras_class_weight": keras_class_weight(class_weights),
         "weight_vector": weight_vector(class_weights),
     }

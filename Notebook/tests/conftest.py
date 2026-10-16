@@ -10,6 +10,28 @@ import re
 
 import pytest
 
+# ---------------------------------------------------------------------------
+# The test suite runs in "own" mode unless a test says otherwise.
+# ---------------------------------------------------------------------------
+# config.DATASET_SOURCE now defaults to "official", which is right for the
+# notebook: the official MSCAD.csv is the primary dataset.  Every test written
+# before that switch existed, though, builds an OWN-extraction frame -- with
+# Src IP, Timestamp and Source_Capture columns -- and asserts own-extraction
+# behaviour (BENIGN_LABELS = ["Benign", "Normal"], Protocol shared into the
+# metadata).  Running those tests under the official overrides would test
+# nothing they were written to test.
+#
+# Setting it HERE works because pytest imports conftest.py before any test
+# module, so `import config` inside a test module reads this value.  It is
+# `setdefault`, so `MSCAD_DATASET_SOURCE=official python -m pytest tests` still
+# runs the whole suite the other way round when that is what you want.
+#
+# The effect is a guard rather than a convenience: these 1,000+ tests now also
+# prove that "own" mode is unchanged by the official-dataset work.  Official
+# mode has its own tests -- tests/test_official_dataset.py and
+# tests/test_dataset_source.py -- which set the mode explicitly.
+os.environ.setdefault("MSCAD_DATASET_SOURCE", "own")
+
 # A Windows drive prefix at the start of a NAME: "C:", "D:", ...
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
 
