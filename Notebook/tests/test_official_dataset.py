@@ -436,3 +436,119 @@ def test_no_keras_3_only_api_in_the_new_modules():
         text = (root / name).read_text(encoding="utf-8")
         assert "keras.ops" not in text, name
         assert "from keras import ops" not in text, name
+
+
+# ===========================================================================
+# 7. the own-extraction Step 3 functions, in official mode
+# ===========================================================================
+# The bug these cover: `save_step3_reports` crosstabs Source_Capture x Label,
+# and the official dataset has no Source_Capture column, so in official mode it
+# failed with `KeyError: 'Source_Capture'` seven frames inside pandas -- which
+# says nothing about what to do. Each one now says it itself and returns a
+# skipped status, writing nothing, so a Run All in official mode walks past
+# 3.1-3.7 instead of stopping.
+def test_own_step3_does_not_apply_in_official_mode():
+    from src.mscad import data_loading as dl
+
+    assert dl.own_step3_applies() is False
+
+
+def test_own_step3_applies_in_own_mode(monkeypatch):
+    from src.mscad import data_loading as dl
+
+    monkeypatch.setattr(config, "DATASET_SOURCE", "own")
+
+    assert dl.own_step3_applies() is True
+
+
+def test_the_report_writer_skips_instead_of_raising_a_key_error(official_mode):
+    """The exact failure: a frame with no Source_Capture column."""
+    from src.mscad import data_loading as dl
+
+    frame = pd.DataFrame({"Label": ["Normal", "Brute_Force"],
+                          "Flow Duration": [1.0, 2.0]})
+
+    out = dl.save_step3_reports(frame, verbose=False)
+
+    assert out["status"] == "skipped_official_mode"
+    assert out["written"] == {}
+    assert "Source_Capture" in out["note"]
+    assert "3.O" in out["note"]
+    assert 'DATASET_SOURCE = "own"' in out["note"]
+    # and nothing was written anywhere
+    assert not (official_mode / "outputs").exists()
+
+
+def test_every_own_step3_entry_point_skips_in_official_mode(official_mode):
+    from src.mscad import data_loading as dl
+
+    frame = pd.DataFrame({"Label": ["Normal"], "Flow Duration": [1.0]})
+
+    table, ok = dl.check_column_consistency({}, verbose=False)
+    assert not len(table) and ok is True
+
+    merged, infos = dl.merge_flow_csvs(frames={}, verbose=False)
+    assert not len(merged) and infos == []
+
+    assert dl.save_merged(frame, verbose=False)["status"] == \
+        "skipped_official_mode"
+    assert dl.summarize_dataset(frame, make_plot=False)["status"] == \
+        "skipped_official_mode"
+    assert dl.save_step3_reports(frame, verbose=False)["status"] == \
+        "skipped_official_mode"
+
+
+def test_save_merged_in_official_mode_writes_nothing(official_mode):
+    """It must not overwrite the file 3.O wrote, or create one of its own."""
+    from src.mscad import data_loading as dl
+
+    write_official(official_frame())
+    od.run_step3(verbose=False)
+    merged_path = Path(config.MERGED_CSV)
+    before = merged_path.read_bytes()
+
+    out = dl.save_merged(pd.DataFrame({"Label": ["Normal"]}), verbose=False)
+
+    assert out["status"] == "skipped_official_mode"
+    assert merged_path.read_bytes() == before
+
+
+def test_load_merged_still_works_in_official_mode(official_mode):
+    """3.5 is NOT skipped: it round-trips the file 3.O wrote."""
+    from src.mscad import data_loading as dl
+
+    write_official(official_frame(with_identifiers=True))
+    od.run_step3(verbose=False)
+
+    frame = dl.load_merged(verbose=False)
+
+    assert len(frame) == 24
+    assert "Src Port" in frame.columns          # kept, as metadata
+    assert od.ROW_COLUMN in frame.columns
+
+
+def test_the_notebook_cells_for_3_1_to_3_7_are_mode_aware():
+    """A Run All in official mode must not stop in the own-extraction cells."""
+    nbformat = pytest.importorskip("nbformat")
+    notebook = (Path(__file__).resolve().parent.parent / "notebooks"
+                / "MSCAD_Pipeline.ipynb")
+    if not notebook.exists():                  # pragma: no cover
+        pytest.skip("the notebook is not in this checkout")
+    nb = nbformat.read(str(notebook), as_version=4)
+    start = next(i for i, c in enumerate(nb.cells)
+                 if c.cell_type == "markdown" and "## Step 3" in c.source)
+    end = next(i for i, c in enumerate(nb.cells)
+               if c.cell_type == "markdown" and "## Step 4" in c.source)
+
+    guarded = 0
+    for cell in nb.cells[start:end]:
+        if cell.cell_type != "code":
+            continue
+        own_calls = ("check_column_consistency(", "merge_flow_csvs(",
+                     "save_merged(", "save_step3_reports(",
+                     "summarize_dataset(")
+        if any(call in cell.source for call in own_calls):
+            assert "config.RUNNING_OFFICIAL" in cell.source, cell["id"]
+            assert "OWN_STEP3_SKIP_NOTE" in cell.source, cell["id"]
+            guarded += 1
+    assert guarded == 5, guarded
