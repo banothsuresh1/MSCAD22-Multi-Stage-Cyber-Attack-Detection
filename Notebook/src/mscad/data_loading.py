@@ -475,6 +475,41 @@ def acquire_captures(folder: Path | str | None = None, verbose: bool = True,
 # ===========================================================================
 # STEP 3 -- column consistency across the captures
 # ===========================================================================
+# ===========================================================================
+# the own-extraction Step 3 functions, and official mode
+# ===========================================================================
+# Steps 3.1 to 3.7 below merge the per-capture flow CSVs this project extracted
+# itself.  None of it applies to the official dataset: that file is already one
+# labelled table, it has no `Source_Capture` column to group by and no
+# per-capture frames to concatenate, and section 3.O has already written the
+# equivalent reports.
+#
+# Reached in official mode, these functions used to fail deep inside pandas --
+# `KeyError: 'Source_Capture'` from a crosstab seven frames down, which says
+# nothing about what to do.  They now say it themselves and return a skipped
+# status, so a Run All in official mode walks past them instead of stopping.
+# Nothing is written in that case.  In own mode not one of them is affected.
+OWN_STEP3_SKIP_NOTE = (
+    "[SKIP]  %s: the own-extraction Step 3 (3.1-3.7) merges the per-capture "
+    "flow CSVs and groups by Source_Capture, and the official dataset has "
+    "neither. Section 3.O has already read MSCAD.csv and written the "
+    "equivalent reports -- label counts, column quality, duplicates and label "
+    "conflicts -- in outputs_official\\step3. Set DATASET_SOURCE = \"own\" in "
+    "config.py to use these cells.")
+
+
+def own_step3_applies() -> bool:
+    """False when the active dataset is the official one, so 3.1-3.7 do not run."""
+    return getattr(config, "DATASET_SOURCE", "own") != "official"
+
+
+def _skip_own_step3(what: str, verbose: bool = True) -> dict[str, Any]:
+    if verbose:
+        print(OWN_STEP3_SKIP_NOTE % what)
+    return {"status": "skipped_official_mode", "ok": True, "written": {},
+            "note": OWN_STEP3_SKIP_NOTE % what}
+
+
 def check_column_consistency(frames: dict[str, pd.DataFrame],
                              verbose: bool = True) -> tuple[pd.DataFrame, bool]:
     """Every capture must have the same columns, in the same order.
@@ -485,6 +520,9 @@ def check_column_consistency(frames: dict[str, pd.DataFrame],
 
     Returns (table, all_consistent).
     """
+    if not own_step3_applies():
+        _skip_own_step3("3.1 check_column_consistency()", verbose=verbose)
+        return pd.DataFrame(), True
     reference_name = next(iter(frames))
     reference = list(frames[reference_name].columns)
 
@@ -540,6 +578,9 @@ def merge_flow_csvs(frames: dict[str, pd.DataFrame] | None = None,
 
     Values are never altered: inf, NaN and duplicate rows all survive.
     """
+    if not own_step3_applies():
+        _skip_own_step3("3.2 merge_flow_csvs()", verbose=verbose)
+        return pd.DataFrame(), []
     order = list(capture_order if capture_order is not None else config.CAPTURE_ORDER)
     infos: list[dict[str, Any]] = []
 
@@ -756,6 +797,8 @@ def save_merged(merged: pd.DataFrame, checks: Sequence[dict[str, Any]] | None = 
     is said plainly and the existing file is LOADED instead, so the returned
     report always describes a real file on disk.
     """
+    if not own_step3_applies():
+        return _skip_own_step3("3.4 save_merged()", verbose=verbose)
     overwrite = config.OVERWRITE_MERGED if overwrite is None else overwrite
     out: dict[str, Any] = {"target": str(config.MERGED_CSV),
                            "folder": str(config.STEP3_OUTPUT_DIR)}
@@ -1251,6 +1294,8 @@ def summarize_dataset(df: pd.DataFrame, make_plot: bool = True,
 
     Counts and describes only: nothing is dropped, filled or changed anywhere.
     """
+    if not own_step3_applies():
+        return _skip_own_step3("3.7 summarize_dataset()", verbose=True)
     out: dict[str, Any] = {}
     feats = [c for c in config.KAGGLE_FEATURES if c in df.columns]
 
@@ -1408,6 +1453,8 @@ def save_step3_reports(merged: pd.DataFrame, summary: dict[str, Any] | None = No
     label_counts.csv, source_capture_x_label.csv, label_counts.png and
     summary.txt -- all under C:\\MSCAD2022\\outputs\\step3, an absolute path.
     """
+    if not own_step3_applies():
+        return _skip_own_step3("3.6 save_step3_reports()", verbose=verbose)
     written: dict[str, str] = {}
     folder = prepare_output_dir(config.STEP3_OUTPUT_DIR, "the Step 3 reports",
                                 verbose=verbose)
