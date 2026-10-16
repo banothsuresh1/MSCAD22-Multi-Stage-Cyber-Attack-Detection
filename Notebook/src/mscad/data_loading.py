@@ -839,6 +839,17 @@ def load_merged(path: Path | str | None = None, prefer_parquet: bool = False,
     Reading the CSV back is the stricter check of the two: it proves the file on
     disk really round-trips, rather than just re-using the frame in memory.
     """
+    # In OFFICIAL mode the merged file is the official dataset's own columns,
+    # so neither build_dtypes() (which names our extraction's columns) nor the
+    # Timestamp_dt parsing below applies to it.  official_dataset reads it with
+    # the dtypes its own Step 3 recorded.  This branch cannot be reached in
+    # "own" mode, where everything below is exactly what it always was.
+    if getattr(config, "DATASET_SOURCE", "own") == "official":
+        from . import official_dataset as od
+
+        if path is None or Path(path) == Path(config.MERGED_CSV):
+            return od.load_merged_official(verbose=verbose)
+
     if path is None:
         path = (config.MERGED_PARQUET
                 if (prefer_parquet and config.MERGED_PARQUET.exists())

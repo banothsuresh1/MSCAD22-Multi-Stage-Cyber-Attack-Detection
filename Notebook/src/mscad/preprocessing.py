@@ -823,6 +823,7 @@ def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
                    metadata: pd.DataFrame | None = None,
                    id_columns: Sequence[str] | None = None,
                    feature_order: Sequence[str] | None = None,
+                   allow_missing_identifiers: bool | None = None,
                    verbose: bool = True) -> pd.DataFrame:
     """Join identifiers, features and the Label side by side, in row order.
 
@@ -840,6 +841,14 @@ def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
     """
     id_columns = (list(config.COMBINED_ID_COLUMNS) if id_columns is None
                   else list(id_columns))
+    # The official dataset may carry none of the identifier columns -- it is a
+    # flow feature table, not a capture.  There, an identifier that is absent
+    # is a FACT about the dataset: it is reported and skipped.  In own mode the
+    # same absence means Step 4's metadata was written wrong, which must still
+    # raise, so the default follows DATASET_SOURCE and "own" is unchanged.
+    if allow_missing_identifiers is None:
+        allow_missing_identifiers = (
+            getattr(config, "DATASET_SOURCE", "own") == "official")
     proto_name = config.COMBINED_PROTOCOL_COLUMN
     wants_protocol = proto_name in id_columns
     from_metadata = [c for c in id_columns if c != proto_name]
@@ -851,13 +860,27 @@ def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
                 "COMBINED_ID_COLUMNS asks for %s but no metadata frame was given"
                 % from_metadata)
         absent = [c for c in from_metadata if c not in metadata.columns]
+        if absent and allow_missing_identifiers:
+            if verbose:
+                show_note("**Identifier columns unavailable:** %s. The %s "
+                          "dataset does not carry them, so `%s` is written "
+                          "without those columns, and every later part that "
+                          "needs them is skipped with a note rather than "
+                          "given an invented value."
+                          % (", ".join(absent),
+                             getattr(config, "DATASET_SOURCE", "own"),
+                             config.COMBINED_CSV.name))
+            from_metadata = [c for c in from_metadata if c not in absent]
+            id_columns = [c for c in id_columns if c not in absent]
+            absent = []
         if absent:
             raise PreprocessingError(
                 "the metadata frame has no %s, so those identifier columns cannot be "
                 "added to preprocessing.csv. Either re-run Step 4 with "
                 "OVERWRITE_STEP4 = True, or let build_combined_from_saved() fill them "
                 "in from %s." % (absent, config.MERGED_CSV))
-        parts["metadata"] = len(metadata)
+        if from_metadata:
+            parts["metadata"] = len(metadata)
     if len(set(parts.values())) != 1:
         raise PreprocessingError(
             "[FAIL] the parts have different row counts and must not be joined: %s. "
@@ -1218,6 +1241,27 @@ def build_combined_from_saved(verbose: bool = True) -> dict[str, Any]:
     if from_metadata:
         metadata = pd.read_csv(folder / names["metadata"], low_memory=False)
         absent = [c for c in from_metadata if c not in metadata.columns]
+        # An identifier the ACTIVE dataset simply does not have cannot be
+        # recovered from the Step 3 file either, because it is not in that file
+        # to recover.  In official mode it is dropped here, named in the table
+        # below; in own mode nothing changes and the recovery path runs.
+        if absent and getattr(config, "DATASET_SOURCE", "own") == "official":
+            merged_columns: set[str] = set()
+            merged_path = config.MERGED_CSV
+            if merged_path.exists():
+                merged_columns = set(pd.read_csv(merged_path, nrows=0).columns)
+            unavailable = [c for c in absent if c not in merged_columns]
+            if unavailable:
+                if verbose:
+                    show_note("**Identifier columns unavailable:** %s -- "
+                              "neither `metadata.csv` nor the Step 3 merged "
+                              "file carries them, because the official "
+                              "dataset does not. They are left out of `%s`."
+                              % (", ".join(unavailable),
+                                 config.COMBINED_CSV.name))
+                from_metadata = [c for c in from_metadata
+                                 if c not in unavailable]
+                absent = [c for c in absent if c not in unavailable]
         for column in from_metadata:
             sources.append({"column": column,
                             "read from": (names["metadata"] if column not in absent

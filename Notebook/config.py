@@ -35,6 +35,47 @@ from pathlib import Path, PureWindowsPath
 # can run on a machine without a C:\ drive.  On your PC they are not set and
 # the literal paths below are used.
 DATA_ROOT = Path(os.environ.get("MSCAD_DATA_ROOT", r"C:\MSCAD2022"))
+
+# ---------------------------------------------------------------------------
+# WHICH DATASET THE PIPELINE RUNS ON
+# ---------------------------------------------------------------------------
+# "official" -- the dataset as its authors published it:
+#       C:\MSCAD2022\CSV_Original_kaggle\MSCAD.csv
+#   128,799 rows x 67 columns (66 features + Label), six classes, and a quick
+#   stratified 80/20 check (seed 42) that a random forest reaches macro-F1
+#   0.8542 on.  This is the PRIMARY dataset.
+#
+# "own"      -- the flows this project extracted from the PCAPs itself.  Kept
+#   for comparison: its labels disagreed with themselves (Benign vs Normal,
+#   Brute_Force vs DoS) across roughly 2,779 normal flows, and a random forest
+#   reached only 0.5836 accuracy on it.
+#
+# The switch decides ONE thing -- where the outputs go -- and nothing else is
+# written anywhere near the other mode's folder:
+#
+#       "official" -> C:\MSCAD2022\outputs_official\
+#       "own"      -> C:\MSCAD2022\outputs\          (exactly as before)
+#
+# In "own" mode every path, default and behaviour in this file is what it was
+# before the official dataset existed; tests assert that.
+DATASET_SOURCE = os.environ.get("MSCAD_DATASET_SOURCE", "official").strip().lower()
+VALID_DATASET_SOURCES = ("official", "own")
+if DATASET_SOURCE not in VALID_DATASET_SOURCES:
+    raise ValueError(
+        "DATASET_SOURCE is %r; it must be one of %s. Set MSCAD_DATASET_SOURCE, "
+        "or edit config.py." % (DATASET_SOURCE, ", ".join(VALID_DATASET_SOURCES)))
+
+RUNNING_OFFICIAL = DATASET_SOURCE == "official"
+
+# The output root for the ACTIVE dataset.  Every STEPn_OUTPUT_DIR below derives
+# from it, so one switch moves the whole pipeline and neither root can be
+# written to while the other is active.
+OUTPUTS_ROOT = DATA_ROOT / ("outputs_official" if RUNNING_OFFICIAL else "outputs")
+
+# The other root, for reference only: nothing in this project writes to it.
+OUTPUTS_ROOT_OWN = DATA_ROOT / "outputs"
+OUTPUTS_ROOT_OFFICIAL = DATA_ROOT / "outputs_official"
+
 # PROJECT_ROOT is the folder this file sits in, so the project works wherever you
 # keep the code (C:\MSCAD2022\Notebook, or a git clone) with nothing to edit.
 PROJECT_ROOT = Path(os.environ.get("MSCAD_PROJECT_ROOT",
@@ -61,7 +102,7 @@ KAGGLE_CSV_DIR = Path(os.environ.get("MSCAD_KAGGLE_CSV_DIR",
                                      r"C:\MSCAD2022\CSV_Original_kaggle"))
 
 # Code-side folders.
-MERGED_DIR = DATA_ROOT / "outputs" / "step3"       # see the Step 2/3 block below
+MERGED_DIR = OUTPUTS_ROOT / "step3"       # see the Step 2/3 block below
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "step1"    # logs and reports
 SRC_DIR = PROJECT_ROOT / "src"
 TESTS_DIR = PROJECT_ROOT / "tests"
@@ -101,7 +142,10 @@ CSV_CANDIDATE_DIRS = [
 # destination is the same no matter where the notebook is started from, and
 # nothing here is ever resolved against the current working directory.
 CSV_INPUT_DIR = CSV_OUTPUT_DIR          # C:\MSCAD2022\CSVs -- Step 2 reads here
-OUTPUTS_DIR = DATA_ROOT / "outputs"     # C:\MSCAD2022\outputs
+# Routed by DATASET_SOURCE: outputs_official\ for the official dataset,
+# outputs\ for our own extraction.  Every STEPn_OUTPUT_DIR in this file is
+# built from OUTPUTS_DIR, so this one line moves all of them.
+OUTPUTS_DIR = OUTPUTS_ROOT               # C:\MSCAD2022\outputs[_official]
 STEP2_OUTPUT_DIR = OUTPUTS_DIR / "step2"   # acquisition report
 STEP3_OUTPUT_DIR = OUTPUTS_DIR / "step3"   # merged dataset + its reports
 STEP4_OUTPUT_DIR = OUTPUTS_DIR / "step4"   # preprocessing outputs
@@ -1982,3 +2026,113 @@ CONFIG_COLOURS = dict(MODEL_COLOURS)
 #   * FUSION_MODELS        -- still Step 13's three models.
 #   * FUSION_ALL_MODELS / XAI_ALL_MODELS -- already include Baseline 6, so
 #     13.8 and 14.9 cover it once they are re-run on purpose.
+
+
+# ===========================================================================
+# ---------------- The official MSCAD dataset (DATASET_SOURCE) --------------
+# ===========================================================================
+# Everything in this block is about the OFFICIAL file and is append-only: in
+# "own" mode not one value below changes anything, because every override is
+# inside `if RUNNING_OFFICIAL:`.  A test asserts that.
+
+# The file as its authors published it.  Read-only: nothing here writes to it.
+OFFICIAL_CSV_DIR = Path(os.environ.get("MSCAD_OFFICIAL_CSV_DIR",
+                                       str(KAGGLE_CSV_DIR)))
+OFFICIAL_CSV = OFFICIAL_CSV_DIR / "MSCAD.csv"
+
+# What the authors' own file contains, for the Step 3 report to check itself
+# against.  These are the published counts, NOT something this code computed:
+# Step 3 prints both and says whether they agree.
+OFFICIAL_EXPECTED_ROWS = 128_799
+OFFICIAL_EXPECTED_COLUMNS = 67                 # 66 features + Label
+OFFICIAL_EXPECTED_LABELS = {
+    "Brute_Force": 88_502,
+    "Normal": 28_502,
+    "Port_Scan": 11_081,
+    "HTTP_DDoS": 641,
+    "ICMP_Flood": 45,
+    "Web_Crwling": 28,                         # the authors' spelling
+}
+OFFICIAL_EXPECTED_DUPLICATE_SHARE = 0.374      # 37.4% of rows share a vector
+
+# The quick stratified 80/20 check (seed 42) the switch was decided on, for the
+# Step 11 comparison to quote.  Again: measured before this PR, not here.
+OFFICIAL_QUICK_CHECK = {
+    "majority class accuracy": 0.6872,
+    "decision tree (depth 3) accuracy": 0.7816,
+    "decision tree (depth 3) macro-F1": 0.5457,
+    "random forest accuracy": 0.9981,
+    "random forest macro-F1": 0.8542,
+}
+OWN_QUICK_CHECK = {"random forest accuracy": 0.5836}
+
+# IDENTIFIERS ARE NEVER FEATURES.  Any of these that the official file turns
+# out to have is moved to metadata and excluded from the features: a port
+# number would let a model learn the target port instead of the behaviour, and
+# an IP would let it learn the attacker's address.  Protocol is deliberately
+# NOT here -- it is a behavioural attribute, and Step 4 one-hot encodes it.
+OFFICIAL_IDENTIFIER_COLUMNS = ["Flow ID", "Src IP", "Dst IP", "Src Port",
+                               "Dst Port", "Timestamp"]
+
+# Added by Step 3 rather than present in the file, and metadata for the same
+# reason: Orig_Row is the row's position in MSCAD.csv, and the official file is
+# sorted by class, so a model given Orig_Row would read the label off the row
+# number.  Source_Capture does not exist in the official file; it is listed so
+# the own-mode column can never reach the features either.
+OFFICIAL_ROW_COLUMNS = ["Orig_Row", "Source_Capture"]
+
+# The six classes exactly as the authors wrote them, including Web_Crwling.
+OFFICIAL_LABELS = ["Brute_Force", "HTTP_DDoS", "ICMP_Flood", "Normal",
+                   "Port_Scan", "Web_Crwling"]
+# The benign set for Label_binary.  The official file has no "Benign" class:
+# its normal traffic is called Normal, and nothing else is benign.
+OFFICIAL_BENIGN_LABELS = ["Normal"]
+
+OFFICIAL_STEP3_FILES = {
+    "merged": "MSCAD_merged.csv",
+    "report": "step3_official_report.csv",
+    "columns": "column_mapping.csv",
+    "manifest": "official_manifest.json",
+    "labels": "label_counts.csv",
+    "quality": "column_quality.csv",
+    "duplicates": "duplicate_rows.csv",
+    "conflicts": "label_conflicts.csv",
+    "conflict_rows": "label_conflict_rows.csv",
+    "summary": "step3_official_summary.md",
+}
+
+# Step 9: a class with fewer than this many VALIDATION rows cannot support an
+# early-stopping signal or a fusion reliability of its own, and both the print
+# and the markdown have to say so.
+RARE_CLASS_VALIDATION_MINIMUM = 5
+
+if RUNNING_OFFICIAL:
+    # --- the label column and the benign set --------------------------------
+    BENIGN_LABELS = list(OFFICIAL_BENIGN_LABELS)
+
+    # --- identifiers out of the features -----------------------------------
+    # split_metadata() keeps only the ones that exist and reports the rest, so
+    # listing all six is safe whether or not the file carries them.
+    METADATA_COLUMNS = list(OFFICIAL_IDENTIFIER_COLUMNS) + list(
+        OFFICIAL_ROW_COLUMNS)
+    METADATA_SHARED_COLUMNS = []       # Protocol is a feature here, not metadata
+    COMBINED_ID_COLUMNS = list(OFFICIAL_IDENTIFIER_COLUMNS)
+    COMBINED_METADATA_ID_COLUMNS = list(OFFICIAL_IDENTIFIER_COLUMNS)
+    ID_COLUMNS_NOT_FOR_TRAINING = list(OFFICIAL_IDENTIFIER_COLUMNS)
+    COMBINED_INT_COLUMNS = [c for c in ("Src Port", "Dst Port")
+                            if c in OFFICIAL_IDENTIFIER_COLUMNS]
+
+    # --- Steps 1-2 do not apply --------------------------------------------
+    # The official file is already one labelled flow table, so there is nothing
+    # to convert from PCAP and nothing to acquire per capture.  The notebook
+    # prints this rather than running them.
+    SKIP_STEPS = ["1", "2"]
+    SKIP_STEPS_NOTE = (
+        "Steps 1 and 2 are SKIPPED in official mode: they convert PCAPNG "
+        "captures to flow CSVs and acquire them one capture at a time, and the "
+        "official dataset is already a single labelled flow table. Step 3 reads "
+        "%s directly. Run with DATASET_SOURCE = \"own\" to use them."
+        % OFFICIAL_CSV)
+else:
+    SKIP_STEPS = []
+    SKIP_STEPS_NOTE = ""
