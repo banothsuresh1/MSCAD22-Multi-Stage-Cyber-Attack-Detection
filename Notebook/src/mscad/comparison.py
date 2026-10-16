@@ -1135,17 +1135,43 @@ HEAD_TO_HEAD_PAIRS_8 = [
 ]
 
 
+def pca_width_caveat(left: str, right: str) -> str:
+    """"" unless the two configurations' PCA spaces are different widths.
+
+    A pair is only a one-difference comparison if everything else matches.  B4
+    keeps the components a 0.95 variance target selected, while B6 needs at
+    least `CNN_KERNEL` of them for the shared stack to be buildable at all, so
+    whenever those counts differ the pair label has to say so instead of
+    promising an isolation it does not have.
+    """
+    counts = []
+    for key in (left, right):
+        metrics = load_result(key) or {}
+        value = metrics.get("pca_components")
+        counts.append(None if value is None else int(value))
+    if None in counts or counts[0] == counts[1]:
+        return ""
+    return (" [two differences: PCA(%d) vs PCA(%d) as well -- see 12.11]"
+            % (counts[0], counts[1]))
+
+
 def all_head_to_heads_8(table: pd.DataFrame,
                         order: Sequence[tuple[str, str]] | None = None
                         ) -> pd.DataFrame:
-    """Every pair that differs in exactly one component, metric by metric."""
+    """Every pair that differs in exactly one component, metric by metric.
+
+    A pair whose two configurations turn out NOT to differ in exactly one
+    component says so in its own label, rather than being dropped or left
+    looking clean.
+    """
     order = config.STEP12_DISPLAY_ORDER if order is None else order
     labels = dict(order)
     frames = []
     for left, right, why in HEAD_TO_HEAD_PAIRS_8:
         if left not in labels or right not in labels:
             continue
-        frame = head_to_head(table, labels[left], labels[right], pair=why)
+        frame = head_to_head(table, labels[left], labels[right],
+                             pair=why + pca_width_caveat(left, right))
         if len(frame):
             frames.append(frame)
     return (pd.concat(frames, ignore_index=True) if frames else pd.DataFrame())
@@ -1165,6 +1191,7 @@ def per_class_difference_8(per_class: pd.DataFrame,
         if (left_label not in per_class.columns
                 or right_label not in per_class.columns):
             continue
+        why = why + pca_width_caveat(left, right)
         for _i, line in per_class.iterrows():
             a = pd.to_numeric(line[left_label], errors="coerce")
             b = pd.to_numeric(line[right_label], errors="coerce")

@@ -1788,7 +1788,23 @@ STEP12_B6_OUTPUT_DIR = OUTPUTS_DIR / "step12_baseline6"
 # PCA with that many components on the B4 encoder's TRAINING latents only,
 # writes it inside the B6 folder, and the row label then reads "PCA(k)";
 # Baseline 4's own pca.joblib is never touched either way.
-B6_PCA_COMPONENTS = "same_as_B4"
+# How many PCA components Baseline 6 uses.
+#   "same_as_B4" -> Baseline 4's fitted pca.joblib, reused byte for byte
+#   int          -> a NEW PCA with that many components, fitted on the
+#                   TRAINING latents only, written inside the Baseline 6
+#                   folder; Baseline 4's own pca.joblib is never touched, and
+#                   the row label says PCA(k) so the two feature spaces cannot
+#                   be confused.
+# This is an int, and not "same_as_B4", for a reason worth keeping in the
+# write-up: PCA_N_COMPONENTS = 0.95 is a VARIANCE target, and on these latents
+# it selects 2 components.  `models.build_cnn_lstm` refuses an input with fewer
+# steps than CNN_KERNEL (3), so B6 cannot be trained in Baseline 4's own
+# 2-component space.  CNN_KERNEL is NOT lowered to fit: it is the kernel
+# Approach 1, B1, B3 and B5 were trained with, and changing it would invalidate
+# every one of those saved results.  3 is the smallest count the shared stack
+# accepts; at that length the pooling layer is skipped, so the LSTM sees 3
+# positions (12.6 prints this, and 12.11 carries the caveat).
+B6_PCA_COMPONENTS = 3
 
 BASELINE6_SPEC = {
     "name": BASELINE6_NAME,

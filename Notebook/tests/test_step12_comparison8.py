@@ -351,6 +351,40 @@ def test_a_head_to_head_difference_is_left_minus_right(tmp_path):
         left - right, abs=1e-9)
 
 
+def test_a_pair_whose_pca_widths_differ_says_so_in_its_own_label(tmp_path):
+    """B4 keeps what a variance target selected; B6 needs at least CNN_KERNEL.
+
+    When those counts differ the pair is not a one-difference comparison, and
+    the label has to say that rather than promising an isolation it lacks.
+    """
+    for i, (key, label) in enumerate(config.STEP12_DISPLAY_ORDER):
+        write_result(key, metrics(label, f1=0.5 + 0.01 * i,
+                                  pca=2 if key == "baseline4_ae_pca_lstm"
+                                  else 3 if key == B6 else None),
+                     predictions_frame(seed=i))
+    built = cmp.build_full_comparison(verbose=False)
+
+    head = cmp.all_head_to_heads_8(built["table"])
+    b4_b6 = [pair for pair in dict.fromkeys(head["pair"])
+             if "B4 vs B6" in pair]
+
+    assert len(b4_b6) == 1
+    assert "two differences" in b4_b6[0]
+    assert "PCA(2) vs PCA(3)" in b4_b6[0]
+    # B1 vs B6 stays clean: B1 has no PCA at all, so nothing is claimed twice
+    b1_b6 = [pair for pair in dict.fromkeys(head["pair"])
+             if "B1 vs B6" in pair]
+    assert len(b1_b6) == 1
+    assert "two differences" not in b1_b6[0]
+
+
+def test_equal_pca_widths_leave_the_pair_label_alone(tmp_path):
+    write_all_eight()          # B4 and B6 both keep 2 components here
+
+    assert cmp.pca_width_caveat("baseline4_ae_pca_lstm", B6) == ""
+    assert cmp.pca_width_caveat("baseline1_ae_cnn_lstm", B6) == ""
+
+
 def test_a_pair_with_an_untrained_side_is_left_out(tmp_path):
     for key, label in config.STEP12_DISPLAY_ORDER:
         if key != B6:

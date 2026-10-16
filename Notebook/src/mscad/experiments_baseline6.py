@@ -145,41 +145,80 @@ def fit_new_pca(Z_train: pd.DataFrame, components: int,
 def pca_length_table(n_components: int) -> pd.DataFrame:
     """What the CNN actually has to slide over, position by position.
 
-    The numbers are the shared architecture's own: `CNN_KERNEL`, `CNN_POOL` and
-    the "same" padding Step 10 uses.
+    The numbers are the shared architecture's own -- `CNN_KERNEL`, `CNN_POOL`
+    and the "same" padding Step 10 uses -- and the two rules are copied from
+    `models.build_cnn_lstm` rather than guessed at, because that function is
+    what decides whether B6 can be built at all:
+
+      * it REFUSES an input with fewer steps than the kernel, and
+      * it pools only when there are at least `pool * 2` steps to halve.
+
+    So three outcomes, not two: `[FAIL]` when the shared builder would refuse,
+    `[WARN]` when it builds but the convolution has almost nothing to slide
+    over, `[OK]` when the sequence is at least two kernel widths long.
     """
     kernel = int(config.CNN_KERNEL)
     pool = int(config.CNN_POOL)
-    after_conv = int(n_components)                 # padding="same"
-    pooled = after_conv // pool if after_conv >= pool else after_conv
+    steps = int(n_components)
+    after_conv = steps                             # padding="same"
+    # models.build_cnn_lstm: "pooling halves the steps, so only pool when
+    # there is something to halve" -- `if steps >= pool * 2`
+    pools = after_conv >= pool * 2
+    pooled = after_conv // pool if pools else after_conv
+    builds = steps >= kernel
+    result = (FAIL if not builds
+              else WARN if (pooled <= 1 or steps < 2 * kernel)
+              else OK)
     return pd.DataFrame([{
-        "PCA components (sequence length in)": int(n_components),
+        "PCA components (sequence length in)": steps,
         "kernel": kernel,
         "length after Conv1D (padding=same)": after_conv,
         "pool size": pool,
+        "pooling applies": bool(pools),
         "positions the LSTM sees": int(pooled),
-        "kernel fits inside the sequence": bool(n_components >= kernel),
-        "result": (OK if n_components >= kernel and pooled > 1 else WARN),
+        "kernel fits inside the sequence": bool(builds),
+        "the shared CNN-LSTM can be built": bool(builds),
+        "result": result,
     }])
 
 
 def pca_length_warning(table: pd.DataFrame) -> str | None:
-    """The sentence the write-up has to carry when the sequence is too short."""
+    """The sentence the write-up has to carry when the sequence is short.
+
+    Two different sentences, because the two cases are not the same problem:
+    a sequence shorter than the kernel cannot be trained at all, while a short
+    but workable sequence can -- it just cannot be described as a CNN over a
+    sequence.
+    """
     row = table.iloc[0]
     if row["result"] == OK:
         return None
+    components = int(row["PCA components (sequence length in)"])
+    kernel = int(row["kernel"])
+    if not bool(row["the shared CNN-LSTM can be built"]):
+        return (
+            "The PCA keeps %d component(s), which is fewer than the shared "
+            "Conv1D kernel of %d, so `models.build_cnn_lstm` REFUSES this "
+            "input and Baseline 6 cannot be trained on it. The shared "
+            "architecture is deliberately NOT lowered to fit: `CNN_KERNEL` is "
+            "the kernel Approach 1, B1, B3 and B5 were trained with, and "
+            "changing it would invalidate every one of those saved results. "
+            "Set `B6_PCA_COMPONENTS` in config.py to an integer of at least "
+            "%d instead -- a NEW PCA is then fitted on the TRAINING latents "
+            "only, Baseline 4's own pca.joblib is left untouched, and the row "
+            "label says PCA(k) so the two feature spaces cannot be confused."
+            % (components, kernel, kernel))
     return (
-        "The PCA keeps %d component(s), so the Conv1D kernel of %d %s and "
-        "pooling leaves %d position(s) for the LSTM. The convolution has "
-        "almost nothing to slide over: B6 is therefore best read as *PCA "
+        "The PCA keeps %d component(s), so the Conv1D kernel of %d fits only "
+        "by padding and %s leaves %d position(s) for the LSTM. The convolution "
+        "has almost nothing to slide over: B6 is therefore best read as *PCA "
         "features with an extra learned front end*, not as a CNN over a "
         "sequence. The shared architecture is deliberately NOT changed for "
         "B6 -- changing it would break the one-difference comparison with B4 "
         "and B1."
-        % (int(row["PCA components (sequence length in)"]), int(row["kernel"]),
-           "does not fit inside the sequence"
-           if not bool(row["kernel fits inside the sequence"])
-           else "fits only by padding",
+        % (components, kernel,
+           "pooling" if bool(row["pooling applies"]) else
+           "the pooling layer is skipped at this length, which",
            int(row["positions the LSTM sees"])))
 
 
@@ -327,7 +366,12 @@ def run_baseline6(overwrite: bool | None = None, epochs: int | None = None,
     refit = not (isinstance(setting, str) and setting == "same_as_B4")
     if refit:
         pca, pca_info = fit_new_pca(Z_train, int(setting), seed=seed)
+        # the leak check re-fits and compares component by component, so it has
+        # to be told the SAME component count B6 asked for; left to default it
+        # would re-fit with config.PCA_N_COMPONENTS (a variance target) and the
+        # two fits could not even be compared
         leak = xpca.assert_pca_fitted_on_train_only(pca, Z_train, Z_test,
+                                                    setting=int(setting),
                                                     seed=seed)
         if leak["result"] != OK:
             raise Baseline6Error(
@@ -365,6 +409,14 @@ def run_baseline6(overwrite: bool | None = None, epochs: int | None = None,
                         "with. The architecture is NOT changed for B6.")
         if warning:
             print("  %s  %s" % (WARN, warning.split(". ")[0] + "."))
+
+    # ---- can the shared architecture take this sequence at all? --------
+    # Asked HERE, with the fix named, rather than letting models.build_cnn_lstm
+    # raise "lower CNN_KERNEL" from four frames down: lowering CNN_KERNEL is
+    # exactly what must not happen, because it is shared with Approach 1, B1,
+    # B3 and B5.
+    if not bool(length.iloc[0]["the shared CNN-LSTM can be built"]):
+        raise Baseline6Error(warning)
 
     # ---- the classifier: Approach 1's, through the shared trainer -------
     model, history, info = xp.train_classifier(

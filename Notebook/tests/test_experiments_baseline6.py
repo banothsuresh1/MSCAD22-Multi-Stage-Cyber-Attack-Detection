@@ -196,30 +196,85 @@ def test_asking_for_more_components_than_the_latent_space_is_refused():
     assert "only %d dimensions" % LATENT in str(error.value)
 
 
-def test_the_default_setting_reuses_baseline_4s_components():
-    assert config.B6_PCA_COMPONENTS == "same_as_B4"
+def test_the_component_count_is_at_least_the_shared_kernel():
+    """Whatever B6_PCA_COMPONENTS is set to, it has to be buildable.
+
+    "same_as_B4" is still supported, and is correct whenever Baseline 4's own
+    PCA is wide enough; it is an int here because on these latents the 0.95
+    variance target selects 2 components and the shared kernel is 3.
+    """
+    setting = config.B6_PCA_COMPONENTS
+    if isinstance(setting, str):
+        assert setting == "same_as_B4"
+        return
+    assert int(setting) >= int(config.CNN_KERNEL)
+    assert int(setting) <= int(config.AE_LATENT_DIM)
+    assert b6.pca_length_table(int(setting)).iloc[0][
+        "the shared CNN-LSTM can be built"]
+
+
+def test_the_shared_architecture_is_not_quietly_tuned_for_b6():
+    """B6 exists to isolate one component; the stack stays Approach 1's."""
+    assert int(config.CNN_KERNEL) == 3
+    assert int(config.CNN_POOL) == 2
+    assert config.BASELINE6_SPEC["model_type"] == "cnn_lstm"
 
 
 # ===========================================================================
 # 12.6a  the PCA length check -- what the convolution has to slide over
 # ===========================================================================
-def test_two_components_leave_the_convolution_almost_nothing_to_slide_over():
-    table = b6.pca_length_table(2)
+def test_a_sequence_shorter_than_the_kernel_is_a_failure_not_a_warning():
+    """`models.build_cnn_lstm` REFUSES this input, so the check must too.
+
+    Baseline 4's PCA keeps whatever a 0.95 variance target selects, which can
+    be fewer components than the shared kernel needs.  Calling that a warning
+    and carrying on is what produced a ModelError four frames down.
+    """
+    table = b6.pca_length_table(int(config.CNN_KERNEL) - 1)
     row = table.iloc[0]
 
-    assert int(row["PCA components (sequence length in)"]) == 2
-    assert int(row["kernel"]) == int(config.CNN_KERNEL)
-    assert int(row["positions the LSTM sees"]) == 1
     assert bool(row["kernel fits inside the sequence"]) is False
-    assert row["result"] == "[WARN]"
+    assert bool(row["the shared CNN-LSTM can be built"]) is False
+    assert row["result"] == "[FAIL]"
 
 
-def test_the_warning_sentence_says_what_b6_can_and_cannot_be_read_as():
-    warning = b6.pca_length_warning(b6.pca_length_table(2))
+def test_the_failure_sentence_names_the_fix_and_refuses_to_lower_the_kernel():
+    warning = b6.pca_length_warning(
+        b6.pca_length_table(int(config.CNN_KERNEL) - 1))
 
     assert warning is not None
-    assert "2 component(s)" in warning
-    assert "1 position(s)" in warning
+    assert "REFUSES" in warning
+    assert "B6_PCA_COMPONENTS" in warning
+    assert "at least %d" % int(config.CNN_KERNEL) in warning
+    # the one thing that must never be suggested
+    assert "deliberately NOT lowered" in warning
+    assert "lower CNN_KERNEL" not in warning
+
+
+def test_the_pooling_rule_is_the_builders_own_rule():
+    """build_cnn_lstm pools only when there are `pool * 2` steps to halve, so
+    three components leave the LSTM three positions and four leave it two."""
+    kernel, pool = int(config.CNN_KERNEL), int(config.CNN_POOL)
+
+    short = b6.pca_length_table(kernel).iloc[0]
+    assert bool(short["pooling applies"]) is False
+    assert int(short["positions the LSTM sees"]) == kernel
+
+    pooled = b6.pca_length_table(pool * 2).iloc[0]
+    assert bool(pooled["pooling applies"]) is True
+    assert int(pooled["positions the LSTM sees"]) == 2
+
+
+def test_a_buildable_but_short_sequence_still_carries_the_caveat():
+    """Three components build, but the convolution has nothing to slide over."""
+    table = b6.pca_length_table(int(config.CNN_KERNEL))
+    row = table.iloc[0]
+    warning = b6.pca_length_warning(table)
+
+    assert bool(row["the shared CNN-LSTM can be built"]) is True
+    assert row["result"] == "[WARN]"
+    assert warning is not None
+    assert "3 component(s)" in warning
     assert "PCA features with an extra learned front end" in warning
     assert "deliberately NOT changed" in warning
 
@@ -243,6 +298,25 @@ def test_the_length_check_uses_the_shared_architectures_own_numbers():
     # padding="same" keeps the length, then pooling divides it
     assert int(row["length after Conv1D (padding=same)"]) == 8
     assert int(row["positions the LSTM sees"]) == 8 // int(config.CNN_POOL)
+
+
+def test_the_shared_builder_agrees_with_the_length_check():
+    """The check is only worth having if it predicts the builder exactly."""
+    from src.mscad import models as md
+
+    for components in (int(config.CNN_KERNEL) - 1, int(config.CNN_KERNEL),
+                       int(config.CNN_POOL) * 2, 8):
+        row = b6.pca_length_table(components).iloc[0]
+        try:
+            model = md.build_cnn_lstm((components, 1), 3, compile_model=False)
+        except Exception:
+            assert bool(row["the shared CNN-LSTM can be built"]) is False, \
+                components
+            continue
+        assert bool(row["the shared CNN-LSTM can be built"]) is True, components
+        lstm = model.get_layer("lstm")
+        seen = int(lstm.input.shape[1])
+        assert seen == int(row["positions the LSTM sees"]), (components, seen)
 
 
 # ===========================================================================
