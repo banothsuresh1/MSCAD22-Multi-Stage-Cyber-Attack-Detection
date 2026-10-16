@@ -162,26 +162,118 @@ def refuse_unreachable(key: str) -> None:
         "folder." % (display_label(key), config.why_unusable(folder)))
 
 
+def other_dataset() -> tuple[str, Path] | None:
+    """(name, output root) of the dataset this run is NOT using.
+
+    Each dataset has its own output root, so a configuration can be finished
+    in one and untouched in the other.  Saying which is the difference between
+    "you are about to destroy a published model" and "this has never been
+    trained on this dataset".
+    """
+    official = getattr(config, "OUTPUTS_ROOT_OFFICIAL", None)
+    own = getattr(config, "OUTPUTS_ROOT_OWN", None)
+    if official is None or own is None:
+        return None
+    return (("own", Path(own)) if getattr(config, "RUNNING_OFFICIAL", False)
+            else ("official", Path(official)))
+
+
+def metrics_path_in_other_root(key: str) -> Path | None:
+    """The same metrics.json under the OTHER dataset's output root, if any."""
+    path = metrics_path(key)
+    other = other_dataset()
+    if path is None or other is None:
+        return None
+    this_root = Path(getattr(config, "OUTPUTS_ROOT", ""))
+    parts = Path(path).parts
+    root_parts = this_root.parts
+    if parts[:len(root_parts)] != root_parts:        # not under this root
+        return None
+    return other[1].joinpath(*parts[len(root_parts):])
+
+
+def step12_results_here() -> list[str]:
+    """The configurations whose saved result exists in the ACTIVE Step 12 folder.
+
+    Approach 1 and Approach 2 are deliberately not counted: their results live
+    in step11\\ and step11_attention\\, so they say nothing about whether Step
+    12 has ever been run against this dataset.
+    """
+    place = config.usable_output_dir(config.STEP12_OUTPUT_DIR)
+    if place is None:
+        return []
+    found = []
+    for other in keys_in_display_order():
+        path = metrics_path(other)
+        if path is None or not path.exists():
+            continue
+        parts, root = Path(path).parts, Path(place).parts
+        if parts[:len(root)] == root:
+            found.append(other)
+    return found
+
+
 def refuse_missing(key: str) -> None:
     """Stop, naming the file and the one line that changes it.
 
     This is the case the lock exists for: a result is missing, so something
     would have to be trained, and training it is exactly what must not happen
     by accident.
+
+    Two different situations end up here, and telling a reader the wrong one is
+    worse than saying nothing:
+
+      * a result that WAS produced earlier in this output root is now missing
+        -- something has been deleted or moved, and training over the top of
+        the tables that quote it is the accident to avoid;
+      * a dataset whose Step 12 has never been run at all -- a fresh output
+        root, where nothing was produced earlier and nothing can be lost.
+
+    The second is what a newly switched DATASET_SOURCE looks like.
     """
     if metrics_path(key) is None:
         refuse_unreachable(key)
-    raise Step12ConfigError(
-        "%s has no saved result and LOCK_TRAINED_MODELS is True, so nothing "
-        "was trained.\n"
-        "    missing: %s\n"
-        "This configuration is meant to be LOADED: its model and metrics were "
-        "produced by an earlier run, and every Step 12 table, the Step 13 "
-        "fusion and the Step 14 explanations were computed from them.\n"
-        "To train it on purpose: set LOCK_TRAINED_MODELS = False in config.py, "
-        "run this file again, and then re-run Steps 11-14 so every table "
-        "agrees again."
-        % (display_label(key), metrics_path(key)))
+
+    source = getattr(config, "DATASET_SOURCE", "own")
+    here = step12_results_here()
+    elsewhere = metrics_path_in_other_root(key)
+    other = other_dataset()
+    lines = [
+        "%s has no saved result in the %s output root, and "
+        "LOCK_TRAINED_MODELS is True, so nothing was trained."
+        % (display_label(key), source),
+        "    missing:        %s" % metrics_path(key),
+        "    this root holds %d of %d Step 12 results"
+        % (len(here), len(keys_in_display_order())),
+    ]
+    if elsewhere is not None and elsewhere.exists() and other is not None:
+        lines.append("    the %s root HAS it: %s" % (other[0], elsewhere))
+    elif other is not None:
+        lines.append("    the %s root does not have it either" % other[0])
+
+    if not here:
+        lines.append(
+            "Step 12 has never been run against the %s dataset: this output "
+            "root holds no configuration results at all, so nothing was "
+            "produced earlier here and nothing can be lost. A result in the "
+            "other root belongs to the other dataset and must NOT be read as "
+            "this one's -- different features, different split, different "
+            "models. Training the Step 12 configurations on the %s dataset is "
+            "its own piece of work, and the lock is what stops it happening by "
+            "accident in the middle of something else." % (source, source))
+    else:
+        lines.append(
+            "This configuration is meant to be LOADED: its model and metrics "
+            "were produced by an earlier run in this output root, and the "
+            "Step 12 tables, the Step 13 fusion and the Step 14 explanations "
+            "were computed from them. %d other configuration(s) here still "
+            "have theirs, so check what happened to this one before "
+            "retraining it." % len(here))
+    lines.append(
+        "To train it here on purpose: set LOCK_TRAINED_MODELS = False in "
+        "config.py, run this file again, and then re-run Steps 13-14 for this "
+        "dataset so every table agrees again.")
+    raise Step12ConfigError("\n".join(lines))
 
 
 def refuse_retrain(key: str) -> None:
