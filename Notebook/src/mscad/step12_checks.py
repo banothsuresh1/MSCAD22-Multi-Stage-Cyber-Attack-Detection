@@ -1388,6 +1388,25 @@ def build_discussion(step12: dict[str, Any], sanity: dict[str, Any] | None,
     if baseline6 is not None and baseline6.get("length_warning"):
         lines.append("- **Baseline 6's sequence length.** %s"
                      % baseline6["length_warning"])
+    b4_metrics = cmp.load_result("baseline4_ae_pca_lstm") or {}
+    b6_metrics = (baseline6 or {}).get("metrics") or {}
+    b4_components = b4_metrics.get("pca_components")
+    b6_components = b6_metrics.get("pca_components")
+    if (b4_components is not None and b6_components is not None
+            and int(b4_components) != int(b6_components)):
+        lines.append(
+            "- **B4 vs B6 differs in two things, not one.** Baseline 4's PCA "
+            "keeps %d component(s) and Baseline 6's keeps %d, because the "
+            "shared Conv1D kernel of %d cannot be built on a shorter "
+            "sequence and the architecture was not changed to fit. So that "
+            "pair mixes the classifier (LSTM vs CNN-LSTM) with the width of "
+            "the PCA space, and the difference between them cannot be "
+            "attributed to the classifier alone. **B1 vs B6 is the clean "
+            "single-difference pair for Baseline 6**: the same AE latents and "
+            "the same CNN-LSTM, with PCA(%d) inserted and nothing else "
+            "changed."
+            % (int(b4_components), int(b6_components), int(config.CNN_KERNEL),
+               int(b6_components)))
     lines.append("- **Provenance is per machine.** The SHA-256 values in "
                  "`provenance.csv` identify the files on the machine that ran "
                  "this notebook; a rerun elsewhere produces different model "

@@ -467,6 +467,12 @@ def test_the_lock_default_in_config_is_on():
     assert config.LOCK_TRAINED_MODELS is True
 
 
+def test_a_finished_sanity_model_is_loaded_rather_than_retrained():
+    """The sanity macro-F1 is quoted in the write-up, so it has to be stable
+    across re-runs rather than retrained into a slightly different number."""
+    assert config.OVERWRITE_STEP12_SANITY is False
+
+
 # ===========================================================================
 # 12.2  the sanity baselines
 # ===========================================================================
@@ -644,6 +650,47 @@ def test_the_sanity_baselines_are_never_part_of_the_ranking():
 
     assert "baseline" not in cmp.COLUMNS
     assert "what it is" not in cmp.COLUMNS
+
+
+# ===========================================================================
+# 12.11  the discussion says where B6 is NOT a one-difference comparison
+# ===========================================================================
+def comparison_table():
+    """The smallest comparison table build_discussion can rank."""
+    return pd.DataFrame([
+        {"config": label, "F1 (macro)": 0.50 + 0.01 * i,
+         "G-mean": 0.40 + 0.01 * i, "binary FPR": 0.02,
+         "F1 macro (dup-free)": 0.50 + 0.01 * i,
+         "G-mean (dup-free)": 0.40 + 0.01 * i}
+        for i, (_key, label) in enumerate(config.STEP12_DISPLAY_ORDER)])
+
+
+def test_the_discussion_states_that_b4_vs_b6_differs_in_two_things(tmp_path):
+    write_config(tmp_path, "baseline4_ae_pca_lstm",
+                 metrics=dict(metrics_payload(
+                     dict(config.STEP12_DISPLAY_ORDER)[
+                         "baseline4_ae_pca_lstm"]), pca_components=2))
+    step12 = {"comparison": comparison_table(), "verified": pd.DataFrame()}
+    baseline6 = {"metrics": {"pca_components": 3}, "length_warning": None}
+
+    text = s12.build_discussion(step12, None, None, None, baseline6)
+
+    assert "B4 vs B6 differs in two things" in text
+    assert "keeps 2 component(s) and Baseline 6's keeps 3" in text
+    assert "B1 vs B6 is the clean single-difference pair" in text
+
+
+def test_the_discussion_makes_no_such_claim_when_the_widths_match(tmp_path):
+    write_config(tmp_path, "baseline4_ae_pca_lstm",
+                 metrics=dict(metrics_payload(
+                     dict(config.STEP12_DISPLAY_ORDER)[
+                         "baseline4_ae_pca_lstm"]), pca_components=3))
+    step12 = {"comparison": comparison_table(), "verified": pd.DataFrame()}
+    baseline6 = {"metrics": {"pca_components": 3}, "length_warning": None}
+
+    text = s12.build_discussion(step12, None, None, None, baseline6)
+
+    assert "differs in two things" not in text
 
 
 # ===========================================================================
