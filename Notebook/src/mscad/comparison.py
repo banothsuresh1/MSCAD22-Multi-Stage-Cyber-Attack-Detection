@@ -88,6 +88,15 @@ def result_path(key: str) -> Path | None:
             return None
         folder = config.usable_output_dir(folder)
         return None if folder is None else folder / "metrics.json"
+    # Baseline 6 has a folder of its own too, for the same reason: it is not
+    # written by the Step 12 runner.  Added beside the Approach 2 branch; no
+    # existing branch changes.
+    if key == getattr(config, "BASELINE6_NAME", "baseline6_ae_pca_cnn_lstm"):
+        folder = getattr(config, "STEP12_B6_OUTPUT_DIR", None)
+        if folder is None:
+            return None
+        folder = config.usable_output_dir(folder)
+        return None if folder is None else folder / "metrics.json"
     folder = config.usable_output_dir(config.STEP12_OUTPUT_DIR)
     return None if folder is None else folder / key / "metrics.json"
 
@@ -120,6 +129,8 @@ def which_step_produces(key: str) -> str:
         return "the Baseline 4 cells (12.3), with OVERWRITE_BASELINE4 = True"
     if key == "baseline5":
         return "the Baseline 5 cells (12.4), with OVERWRITE_BASELINE5 = True"
+    if key == getattr(config, "BASELINE6_NAME", "baseline6_ae_pca_cnn_lstm"):
+        return "the Baseline 6 cells (12.6), with OVERWRITE_BASELINE6 = True"
     if key == "proposed":
         return "Step 10 and Step 11, then Step 12"
     return "Step 12 (set OVERWRITE_STEP12 = True)"
@@ -968,4 +979,851 @@ def run_step12_full(verbose: bool = True) -> dict[str, Any]:
                         "FPR, the parameter count and the times. Rows read "
                         "`%s` until their model exists."
                         % config.NOT_TRAINED_TEXT)
+    return out
+
+
+# ===========================================================================
+# 12.1b  THE EIGHT-CONFIGURATION TABLES  (added; nothing above is changed)
+# ===========================================================================
+# Baseline 6 joins the display order, so every function above that iterates
+# `STEP12_DISPLAY_ORDER` already covers it.  What it cannot do is describe a
+# configuration that is in neither EXPERIMENTS_WITH_PCA nor the two addenda,
+# so the configuration and training-setup tables are built here instead.
+FIGURE_FILES = {
+    "metrics": "fig_metrics_8configs",
+    "metrics_free": "fig_metrics_duplicate_free_8configs",
+    "accuracy": "fig_accuracy_8configs",
+    "roc": "fig_roc_macro_8configs",
+    "per_class": "fig_per_class_f1_8configs",
+    "confusion": "fig_confusion_grid_8configs",
+    "time": "fig_time_8configs",
+    "fpr": "fig_binary_fpr_8configs",
+}
+
+
+def model_colour(key: str) -> str:
+    """One fixed colour per configuration, used by every Step 12 figure."""
+    colours = getattr(config, "MODEL_COLOURS", {}) or {}
+    if key in colours:
+        return colours[key]
+    order = [k for k, _label in config.STEP12_DISPLAY_ORDER]
+    palette = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4",
+               "#8a63d2", "#00a9b5", "#a06a2c"]
+    return palette[(order.index(key) if key in order else 0) % len(palette)]
+
+
+def short_label(key: str) -> str:
+    return display_label(key).split(":")[0].strip()
+
+
+def configuration_table_8(order: Sequence[tuple[str, str]] | None = None
+                          ) -> pd.DataFrame:
+    """One row per configuration: what it is made of, and what it isolates.
+
+    Everything that can be read from a saved metrics.json is read from it --
+    the input width, the latent width, the PCA components and the variance
+    they keep, the parameter count -- so the table describes the model that
+    actually ran rather than the configuration that was intended.
+    """
+    order = config.STEP12_DISPLAY_ORDER if order is None else order
+    approach2 = getattr(config, "APPROACH2_KEY", "approach2_attention")
+    baseline6 = getattr(config, "BASELINE6_NAME", "baseline6_ae_pca_cnn_lstm")
+    specs = {spec["name"]: spec for spec in config.EXPERIMENTS_WITH_PCA}
+    rows = []
+    for key, label in order:
+        metrics = load_result(key) or {}
+        spec = specs.get(key, {})
+        pca_block = metrics.get("pca") or {}
+        components = metrics.get("pca_components")
+        latent = metrics.get("latent_dim")
+        if key == approach2:
+            selection, ae, pca, cnn, attention = (
+                "Step 6 top %d" % config.N_SELECTED_FEATURES, True, False,
+                "yes", "yes")
+        elif key == "baseline5":
+            selection, ae, pca, cnn, attention = (
+                "MI only, top %d" % config.BASELINE5_TOP_K, True, False,
+                "yes", "no")
+        elif key == baseline6:
+            selection, ae, pca, cnn, attention = (
+                "none (all Step 5 features)", True, True, "yes", "no")
+        else:
+            selection = ("Step 6 top %d" % config.N_SELECTED_FEATURES
+                         if spec.get("feature_source") == "selected30"
+                         else "none (all Step 5 features)")
+            ae = bool(spec.get("use_ae"))
+            pca = bool(spec.get("use_pca"))
+            cnn = "yes" if spec.get("model_type") == "cnn_lstm" else "no"
+            attention = "no"
+        rows.append({
+            "config": label,
+            "input features": metrics.get("n_input_features", "-"),
+            "feature selection": selection,
+            "AE": ("yes (-> %s)" % (latent or config.AE_LATENT_DIM)) if ae
+                  else "no",
+            "PCA": ("%s of %s (%.1f%% variance)"
+                    % (components, latent,
+                       100 * float(pca_block.get("variance_kept", float("nan"))))
+                    if pca and components else ("yes" if pca else "no")),
+            "CNN": cnn, "attention": attention, "LSTM": "yes",
+            "input shape": (str(tuple(metrics.get("model_input_shape") or []))
+                            or "-"),
+            "params": metrics.get("parameters", "-"),
+            "what it isolates": config.STEP12_ISOLATES.get(key, ""),
+        })
+    return pd.DataFrame(rows)
+
+
+def training_setup_table(order: Sequence[tuple[str, str]] | None = None
+                         ) -> pd.DataFrame:
+    """The protocol, side by side, so any difference is visible rather than
+    assumed away.
+
+    Values recorded by the run itself (seed, best epoch, training time) come
+    from its metrics.json; the shared settings come from config, which is what
+    every configuration was trained with.
+    """
+    order = config.STEP12_DISPLAY_ORDER if order is None else order
+    rows = []
+    for key, label in order:
+        metrics = load_result(key)
+        if metrics is None:
+            rows.append({"config": label, "optimiser": "-",
+                         "learning rate": "-", "batch size": "-",
+                         "max epochs": "-", "best epoch": "-",
+                         "patience": "-", "early stopping on": "-",
+                         "class weighting": "-", "seed": "-",
+                         "train time (s)": "-"})
+            continue
+        rows.append({
+            "config": label,
+            "optimiser": "Adam",
+            "learning rate": config.CLF_LR,
+            "batch size": config.CLF_BATCH_SIZE,
+            "max epochs": config.CLF_EPOCHS,
+            "best epoch": metrics.get("best_epoch", "-"),
+            "patience": config.CLF_PATIENCE,
+            "early stopping on": config.EARLY_STOP_METRIC,
+            "class weighting": "%s / %s" % (config.IMBALANCE_STRATEGY,
+                                            config.CLASS_WEIGHT_SCHEME),
+            "seed": metrics.get("seed", config.RANDOM_STATE),
+            "train time (s)": (round(float(metrics["training_seconds"]), 1)
+                               if metrics.get("training_seconds") is not None
+                               else "-"),
+        })
+    return pd.DataFrame(rows)
+
+
+# ===========================================================================
+# 12.9b  THE SEVEN HEAD-TO-HEAD PAIRS
+# ===========================================================================
+HEAD_TO_HEAD_PAIRS_8 = [
+    ("proposed", "baseline1_ae_cnn_lstm",
+     "feature selection: Approach 1 vs B1 (with vs without)"),
+    ("proposed", "baseline5",
+     "selection method: Approach 1 vs B5 (fused vs MI only)"),
+    ("proposed", "approach2_attention",
+     "attention: Approach 1 vs Approach 2"),
+    ("baseline1_ae_cnn_lstm", "baseline2_ae_lstm",
+     "the CNN front end: B1 vs B2"),
+    ("baseline1_ae_cnn_lstm", "baseline3_cnn_lstm",
+     "the autoencoder: B1 vs B3"),
+    ("baseline4_ae_pca_lstm", "baseline6_ae_pca_cnn_lstm",
+     "the CNN on PCA features: B4 vs B6"),
+    ("baseline1_ae_cnn_lstm", "baseline6_ae_pca_cnn_lstm",
+     "PCA before an unchanged CNN-LSTM: B1 vs B6"),
+]
+
+
+def all_head_to_heads_8(table: pd.DataFrame,
+                        order: Sequence[tuple[str, str]] | None = None
+                        ) -> pd.DataFrame:
+    """Every pair that differs in exactly one component, metric by metric."""
+    order = config.STEP12_DISPLAY_ORDER if order is None else order
+    labels = dict(order)
+    frames = []
+    for left, right, why in HEAD_TO_HEAD_PAIRS_8:
+        if left not in labels or right not in labels:
+            continue
+        frame = head_to_head(table, labels[left], labels[right], pair=why)
+        if len(frame):
+            frames.append(frame)
+    return (pd.concat(frames, ignore_index=True) if frames else pd.DataFrame())
+
+
+def per_class_difference_8(per_class: pd.DataFrame,
+                           order: Sequence[tuple[str, str]] | None = None
+                           ) -> pd.DataFrame:
+    """Per-class F1 differences for the same pairs, class by class."""
+    if per_class is None or not len(per_class):
+        return pd.DataFrame()
+    order = config.STEP12_DISPLAY_ORDER if order is None else order
+    labels = dict(order)
+    rows = []
+    for left, right, why in HEAD_TO_HEAD_PAIRS_8:
+        left_label, right_label = labels.get(left), labels.get(right)
+        if (left_label not in per_class.columns
+                or right_label not in per_class.columns):
+            continue
+        for _i, line in per_class.iterrows():
+            a = pd.to_numeric(line[left_label], errors="coerce")
+            b = pd.to_numeric(line[right_label], errors="coerce")
+            if pd.isna(a) or pd.isna(b):
+                continue
+            rows.append({
+                "pair": why, "Label": line["Label"],
+                "test rows": line.get("test rows"),
+                short_label(left): round(float(a), 6),
+                short_label(right): round(float(b), 6),
+                "difference": round(float(a - b), 6),
+                "favours": (short_label(left) if a > b
+                            else short_label(right) if b > a else "tie")})
+    return pd.DataFrame(rows)
+
+
+# ===========================================================================
+# 12.8b  THE PUBLICATION FIGURES -- one colour per configuration, PNG + PDF
+# ===========================================================================
+def _pyplot(verbose: bool = True):
+    return xp._pyplot(verbose)
+
+
+def _style(ax) -> None:
+    """The project's axis style, from the module that defines it."""
+    from . import fusion as fz
+    fz._style(ax)
+
+
+def _sequential_ramp() -> list[str]:
+    """The one-hue ramp every heatmap in this project uses."""
+    from . import fusion as fz
+    return list(fz._SEQ_RAMP)
+
+
+def _save_figure(fig, folder: Path, stem: str, verbose: bool = True,
+                 also: Path | None = None) -> dict[str, str]:
+    """Write one figure as PNG (dpi 300) and PDF, into one or two folders.
+
+    New stems, so nothing a previous Step 12 wrote is overwritten.
+    """
+    import matplotlib.pyplot as plt
+
+    dpi = int(getattr(config, "THESIS_FIGURE_DPI", 300))
+    written: dict[str, str] = {}
+    fig.tight_layout()
+    for place in [folder] + ([also] if also is not None else []):
+        place = Path(place)
+        place.mkdir(parents=True, exist_ok=True)
+        for suffix in ("png", "pdf"):
+            path = place / ("%s.%s" % (stem, suffix))
+            fig.savefig(path, dpi=dpi, facecolor=fig.get_facecolor())
+            written[("%s:%s" % (place.name, suffix))] = str(path)
+    plt.close(fig)
+    if verbose:
+        print("  [SAVE]  %s.png / .pdf" % stem)
+    return written
+
+
+def _figure_rows(table: pd.DataFrame,
+                 order: Sequence[tuple[str, str]] | None = None
+                 ) -> list[tuple[str, str, pd.Series]]:
+    """(key, label, row) for every configuration that has numbers, in order."""
+    order = config.STEP12_DISPLAY_ORDER if order is None else order
+    rows = []
+    for key, label in order:
+        part = table[table["config"] == label]
+        if len(part) and pd.notna(pd.to_numeric(part.iloc[0].get("F1 (macro)"),
+                                                errors="coerce")):
+            rows.append((key, label, part.iloc[0]))
+    return rows
+
+
+def figure_metric_bars(table: pd.DataFrame, columns: Sequence[str],
+                       title: str, folder: Path, stem: str,
+                       reference: float | None = None,
+                       reference_label: str = "", verbose: bool = True,
+                       also: Path | None = None) -> dict[str, str]:
+    """Grouped bars across configurations, each in its own fixed colour.
+
+    The colour identifies the configuration, so the bar groups are also
+    separated by position and every bar carries its value: colour is never the
+    only encoding.
+    """
+    plt = _pyplot(verbose)
+    rows = _figure_rows(table)
+    if plt is None or not rows:
+        return {}
+    columns = [c for c in columns if c in table.columns]
+    positions = np.arange(len(columns), dtype="float64")
+    width = 0.80 / max(len(rows), 1)
+
+    fig, ax = plt.subplots(figsize=(10.0, 5.0))
+    fig.patch.set_facecolor(dl._SURFACE)
+    _style(ax)
+    for index, (key, label, row) in enumerate(rows):
+        values = [float(pd.to_numeric(row.get(c), errors="coerce"))
+                  for c in columns]
+        offset = (index - (len(rows) - 1) / 2) * width
+        bars = ax.bar(positions + offset, np.nan_to_num(values), width * 0.92,
+                      label=short_label(key), color=model_colour(key))
+        for bar, value in zip(bars, values):
+            if np.isnan(value):
+                continue
+            ax.annotate("%.3f" % value,
+                        (bar.get_x() + bar.get_width() / 2, value),
+                        textcoords="offset points", xytext=(0, 2),
+                        ha="center", fontsize=6, rotation=90,
+                        color=dl._INK)
+    if reference is not None and not np.isnan(reference):
+        ax.axhline(reference, color=dl._INK_SOFT, linestyle="--", linewidth=1.2)
+        ax.annotate(reference_label or "reference %.3f" % reference,
+                    (len(columns) - 0.5, reference), textcoords="offset points",
+                    xytext=(-4, 4), ha="right", fontsize=8, color=dl._INK_SOFT)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(columns, fontsize=9, color=dl._INK_SOFT)
+    ax.set_ylabel("score (0-1)", color=dl._INK_SOFT, fontsize=10)
+    ax.set_title(title, color=dl._INK, fontsize=12, pad=12)
+    ax.set_ylim(0, 1.18)
+    legend = ax.legend(frameon=False, loc="upper center", fontsize=8,
+                       ncol=min(len(rows), 8))
+    for text in legend.get_texts():
+        text.set_color(dl._INK_SOFT)
+    return _save_figure(fig, folder, stem, verbose=verbose, also=also)
+
+
+def figure_accuracy(table: pd.DataFrame, folder: Path, stem: str,
+                    majority: float | None = None, verbose: bool = True,
+                    also: Path | None = None) -> dict[str, str]:
+    """Accuracy with the majority-class line, on an axis that does not lie.
+
+    The axis starts a little below the lowest bar rather than at the majority
+    line, and the range is stated in the title, because a zoomed accuracy axis
+    is the easiest way to make a 0.002 difference look decisive.
+    """
+    plt = _pyplot(verbose)
+    rows = _figure_rows(table)
+    if plt is None or not rows:
+        return {}
+    values = [float(pd.to_numeric(row.get("accuracy"), errors="coerce"))
+              for _k, _l, row in rows]
+    lowest = float(np.nanmin(values + ([majority] if majority else [])))
+    floor = max(0.0, lowest - 0.02)
+
+    fig, ax = plt.subplots(figsize=(10.0, 5.0))
+    fig.patch.set_facecolor(dl._SURFACE)
+    _style(ax)
+    bars = ax.bar(np.arange(len(rows)), values, 0.62,
+                  color=[model_colour(k) for k, _l, _r in rows])
+    for bar, value in zip(bars, values):
+        ax.annotate("%.4f" % value,
+                    (bar.get_x() + bar.get_width() / 2, value),
+                    textcoords="offset points", xytext=(0, 3), ha="center",
+                    fontsize=8, color=dl._INK)
+    if majority is not None and not np.isnan(majority):
+        ax.axhline(majority, color=dl._INK_SOFT, linestyle="--", linewidth=1.3)
+        ax.annotate("majority class %.4f" % majority,
+                    (len(rows) - 0.5, majority), textcoords="offset points",
+                    xytext=(-4, 5), ha="right", fontsize=9, color=dl._INK_SOFT)
+    ax.set_xticks(np.arange(len(rows)))
+    ax.set_xticklabels([short_label(k) for k, _l, _r in rows], fontsize=9,
+                       color=dl._INK_SOFT)
+    ax.set_ylabel("accuracy", color=dl._INK_SOFT, fontsize=10)
+    ax.set_ylim(floor, 1.002)
+    ax.set_title("Accuracy barely separates these models -- axis %.3f to 1.000"
+                 % floor, color=dl._INK, fontsize=12, pad=12)
+    return _save_figure(fig, folder, stem, verbose=verbose, also=also)
+
+
+def _roc_macro(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, float]:
+    """The macro one-vs-rest ROC curve of one configuration's predictions."""
+    from sklearn.metrics import auc, roc_curve
+
+    columns = [c for c in frame.columns if c.startswith("p_")]
+    truth = frame["y_true"].to_numpy()
+    grid = np.linspace(0.0, 1.0, 201)
+    curves = []
+    for index, column in enumerate(columns):
+        positive = (truth == index).astype("int64")
+        if positive.sum() == 0 or positive.sum() == len(positive):
+            continue
+        fpr, tpr, _t = roc_curve(positive, frame[column].to_numpy())
+        curves.append(np.interp(grid, fpr, tpr))
+    if not curves:
+        return grid, grid, float("nan")
+    mean = np.mean(curves, axis=0)
+    return grid, mean, float(auc(grid, mean))
+
+
+def figure_roc(folder: Path, stem: str,
+               order: Sequence[tuple[str, str]] | None = None,
+               verbose: bool = True, also: Path | None = None
+               ) -> dict[str, str]:
+    """One macro-average OvR ROC curve per configuration, in display order."""
+    plt = _pyplot(verbose)
+    if plt is None:
+        return {}
+    order = config.STEP12_DISPLAY_ORDER if order is None else order
+    fig, ax = plt.subplots(figsize=(10.0, 5.0))
+    fig.patch.set_facecolor(dl._SURFACE)
+    _style(ax)
+    drawn = 0
+    for key, label in order:
+        frame = _predictions(key)
+        if frame is None or "y_true" not in frame.columns:
+            continue
+        grid, mean, area = _roc_macro(frame)
+        if np.isnan(area):
+            continue
+        ax.plot(grid, mean, linewidth=2.0, color=model_colour(key),
+                label="%s (AUC %.4f)" % (short_label(key), area))
+        drawn += 1
+    if not drawn:
+        plt.close(fig)
+        return {}
+    ax.plot([0, 1], [0, 1], linewidth=1.0, color=dl._GRID, linestyle="--")
+    ax.set_xlabel("false-positive rate", color=dl._INK_SOFT, fontsize=10)
+    ax.set_ylabel("true-positive rate", color=dl._INK_SOFT, fontsize=10)
+    ax.set_title("Macro one-vs-rest ROC, %d configurations" % drawn,
+                 color=dl._INK, fontsize=12, pad=12)
+    legend = ax.legend(frameon=False, loc="lower right", fontsize=8)
+    for text in legend.get_texts():
+        text.set_color(dl._INK_SOFT)
+    return _save_figure(fig, folder, stem, verbose=verbose, also=also)
+
+
+def figure_per_class_heatmap(per_class: pd.DataFrame, folder: Path, stem: str,
+                             verbose: bool = True, also: Path | None = None
+                             ) -> dict[str, str]:
+    """Label x configuration F1, one hue, every cell annotated."""
+    plt = _pyplot(verbose)
+    if plt is None or per_class is None or not len(per_class):
+        return {}
+    from matplotlib.colors import LinearSegmentedColormap
+
+    frame = per_class.set_index("Label")
+    support = (frame.pop("test rows") if "test rows" in frame.columns
+               else None)
+    values = frame.to_numpy(dtype="float64")
+    labels = ["%s (%s)" % (name, "{:,}".format(int(support[name])))
+              if support is not None else str(name) for name in frame.index]
+
+    fig, ax = plt.subplots(figsize=(10.0, max(4.0, 0.6 * len(frame) + 2.2)))
+    fig.patch.set_facecolor(dl._SURFACE)
+    ax.set_facecolor(dl._SURFACE)
+    cmap = LinearSegmentedColormap.from_list("mscad_blue", _sequential_ramp())
+    image = ax.imshow(values, cmap=cmap, vmin=0.0, vmax=1.0, aspect="auto")
+    ax.set_xticks(range(values.shape[1]))
+    ax.set_xticklabels([str(c).split(":")[0] for c in frame.columns],
+                       rotation=30, ha="right", fontsize=9,
+                       color=dl._INK_SOFT)
+    ax.set_yticks(range(values.shape[0]))
+    ax.set_yticklabels(labels, fontsize=9, color=dl._INK_SOFT)
+    for i in range(values.shape[0]):
+        for j in range(values.shape[1]):
+            if np.isnan(values[i, j]):
+                continue
+            ax.annotate("%.2f" % values[i, j], (j, i), ha="center",
+                        va="center", fontsize=8,
+                        color="#ffffff" if values[i, j] > 0.55 else dl._INK)
+    for side in ax.spines.values():
+        side.set_visible(False)
+    ax.tick_params(length=0)
+    ax.set_title("Per-class F1 (test rows per class in the label)",
+                 color=dl._INK, fontsize=12, pad=12)
+    bar = fig.colorbar(image, ax=ax, fraction=0.03, pad=0.02)
+    bar.set_label("F1", color=dl._INK_SOFT, fontsize=9)
+    bar.ax.tick_params(colors=dl._INK_SOFT, labelsize=8)
+    bar.outline.set_visible(False)
+    return _save_figure(fig, folder, stem, verbose=verbose, also=also)
+
+
+def figure_confusion_grid(folder: Path, stem: str,
+                          order: Sequence[tuple[str, str]] | None = None,
+                          verbose: bool = True, also: Path | None = None
+                          ) -> dict[str, str]:
+    """Row-normalised confusion matrices, 2 x 4, in the display order."""
+    plt = _pyplot(verbose)
+    if plt is None:
+        return {}
+    from matplotlib.colors import LinearSegmentedColormap
+
+    order = config.STEP12_DISPLAY_ORDER if order is None else order
+    panels = []
+    for key, label in order:
+        path = result_path(key)
+        if path is None:
+            continue
+        candidate = path.parent / "confusion_matrix_rownorm.csv"
+        if candidate.exists():
+            panels.append((key, label, pd.read_csv(candidate, index_col=0)))
+    if not panels:
+        return {}
+
+    columns = 4
+    rows = int(np.ceil(len(panels) / columns))
+    fig, axes = plt.subplots(rows, columns, figsize=(10.0, 3.0 * rows + 0.8),
+                             squeeze=False)
+    fig.patch.set_facecolor(dl._SURFACE)
+    cmap = LinearSegmentedColormap.from_list("mscad_blue", _sequential_ramp())
+    for position, (key, label, matrix) in enumerate(panels):
+        ax = axes[position // columns][position % columns]
+        ax.set_facecolor(dl._SURFACE)
+        values = matrix.to_numpy(dtype="float64")
+        ax.imshow(values, cmap=cmap, vmin=0.0, vmax=1.0, aspect="auto")
+        names = [str(v)[:10] for v in matrix.index]
+        ax.set_xticks(range(len(names)))
+        ax.set_xticklabels(names, rotation=90, fontsize=6,
+                           color=dl._INK_SOFT)
+        ax.set_yticks(range(len(names)))
+        ax.set_yticklabels(names, fontsize=6, color=dl._INK_SOFT)
+        ax.set_title(short_label(key), color=model_colour(key), fontsize=10,
+                     pad=6)
+        for side in ax.spines.values():
+            side.set_visible(False)
+        ax.tick_params(length=0)
+    for empty in range(len(panels), rows * columns):
+        axes[empty // columns][empty % columns].axis("off")
+    fig.suptitle("Row-normalised confusion matrices -- the diagonal is recall",
+                 color=dl._INK, fontsize=12)
+    return _save_figure(fig, folder, stem, verbose=verbose, also=also)
+
+
+def figure_single_metric(table: pd.DataFrame, column: str, title: str,
+                         ylabel: str, folder: Path, stem: str,
+                         lower_is_better: bool = False, log: bool = False,
+                         verbose: bool = True, also: Path | None = None
+                         ) -> dict[str, str]:
+    """One measure across the configurations: times, or the binary FPR."""
+    plt = _pyplot(verbose)
+    rows = _figure_rows(table)
+    if plt is None or not rows or column not in table.columns:
+        return {}
+    values = [float(pd.to_numeric(row.get(column), errors="coerce"))
+              for _k, _l, row in rows]
+    if not np.isfinite(np.nan_to_num(values)).any():
+        return {}
+
+    fig, ax = plt.subplots(figsize=(10.0, 5.0))
+    fig.patch.set_facecolor(dl._SURFACE)
+    _style(ax)
+    bars = ax.bar(np.arange(len(rows)), np.nan_to_num(values), 0.62,
+                  color=[model_colour(k) for k, _l, _r in rows])
+    for bar, value in zip(bars, values):
+        if np.isnan(value):
+            continue
+        ax.annotate(("%.4f" if abs(value) < 10 else "%.1f") % value,
+                    (bar.get_x() + bar.get_width() / 2, value),
+                    textcoords="offset points", xytext=(0, 3), ha="center",
+                    fontsize=8, color=dl._INK)
+    if log:
+        ax.set_yscale("log")
+    ax.set_xticks(np.arange(len(rows)))
+    ax.set_xticklabels([short_label(k) for k, _l, _r in rows], fontsize=9,
+                       color=dl._INK_SOFT)
+    ax.set_ylabel(ylabel, color=dl._INK_SOFT, fontsize=10)
+    ax.set_title("%s%s" % (title, " (lower is better)" if lower_is_better
+                           else ""), color=dl._INK, fontsize=12, pad=12)
+    return _save_figure(fig, folder, stem, verbose=verbose, also=also)
+
+
+def draw_figures_8(built: dict[str, Any], folder: Path,
+                   majority_accuracy: float | None = None,
+                   random_macro_f1: float | None = None,
+                   thesis: Path | None = None, verbose: bool = True
+                   ) -> dict[str, str]:
+    """Every 12.8 figure, as PNG (dpi 300) and PDF, with new file names."""
+    table = built["table"]
+    charts: dict[str, str] = {}
+    charts.update(figure_metric_bars(
+        table, ["F1 (macro)", "G-mean", "ROC-AUC (macro OvR)"],
+        "Full test set -- macro-F1, G-mean and ROC-AUC, %d configurations"
+        % len(_figure_rows(table)), folder, FIGURE_FILES["metrics"],
+        reference=random_macro_f1,
+        reference_label=("random-baseline macro-F1 %.3f" % random_macro_f1
+                         if random_macro_f1 is not None else ""),
+        verbose=verbose, also=thesis))
+    charts.update(figure_metric_bars(
+        table, ["F1 macro (dup-free)", "G-mean (dup-free)"],
+        "Duplicate-free subset -- the conservative comparison",
+        folder, FIGURE_FILES["metrics_free"], reference=random_macro_f1,
+        reference_label=("random-baseline macro-F1 %.3f" % random_macro_f1
+                         if random_macro_f1 is not None else ""),
+        verbose=verbose, also=thesis))
+    charts.update(figure_accuracy(table, folder, FIGURE_FILES["accuracy"],
+                                  majority=majority_accuracy, verbose=verbose,
+                                  also=thesis))
+    charts.update(figure_roc(folder, FIGURE_FILES["roc"], verbose=verbose,
+                             also=thesis))
+    charts.update(figure_per_class_heatmap(built.get("per_class"), folder,
+                                           FIGURE_FILES["per_class"],
+                                           verbose=verbose, also=thesis))
+    charts.update(figure_confusion_grid(folder, FIGURE_FILES["confusion"],
+                                        verbose=verbose, also=thesis))
+    charts.update(figure_single_metric(
+        table, "train time (s)", "Training time", "seconds", folder,
+        FIGURE_FILES["time"], lower_is_better=True, log=True, verbose=verbose,
+        also=thesis))
+    charts.update(figure_single_metric(
+        table, "binary FPR", "Binary false-positive rate",
+        "false positives / benign flows", folder, FIGURE_FILES["fpr"],
+        lower_is_better=True, verbose=verbose, also=thesis))
+    return charts
+
+
+# ===========================================================================
+# 12.x  THE THESIS EXPORTS -- the same tables, as CSV and LaTeX
+# ===========================================================================
+def _latex_escape(value: Any) -> str:
+    """Make one cell safe for LaTeX without changing what it says."""
+    text = "" if value is None else str(value)
+    if text == "nan":
+        return "--"
+    for old, new in (("\\", r"\textbackslash{}"), ("&", r"\&"), ("%", r"\%"),
+                     ("$", r"\$"), ("#", r"\#"), ("_", r"\_"), ("{", r"\{"),
+                     ("}", r"\}"), ("~", r"\textasciitilde{}"),
+                     ("^", r"\textasciicircum{}")):
+        text = text.replace(old, new)
+    return text.replace("->", r"$\rightarrow$")
+
+
+def to_latex(frame: pd.DataFrame, caption: str, label: str,
+             note: str | None = None, decimals: int = 4) -> str:
+    """A booktabs table a thesis can \\input{} directly.
+
+    Written here rather than through `DataFrame.to_latex` so the caption, the
+    label, the column alignment and the footnote are all under this project's
+    control and identical across every exported table.
+    """
+    if frame is None or not len(frame):
+        return "%% %s: no rows\n" % caption
+    columns = list(frame.columns)
+    alignment = "l" + "".join(
+        "r" if pd.api.types.is_numeric_dtype(frame[c]) else "l"
+        for c in columns[1:])
+    lines = [r"\begin{table}[htbp]", r"  \centering",
+             r"  \caption{%s}" % _latex_escape(caption),
+             r"  \label{tab:%s}" % label,
+             r"  \begin{tabular}{%s}" % alignment, r"    \toprule",
+             "    " + " & ".join(r"\textbf{%s}" % _latex_escape(c)
+                                 for c in columns) + r" \\",
+             r"    \midrule"]
+    for _i, row in frame.iterrows():
+        cells = []
+        for column in columns:
+            value = row[column]
+            if isinstance(value, (int, np.integer)):
+                cells.append("{:,}".format(int(value)))
+            elif isinstance(value, (float, np.floating)):
+                cells.append("--" if pd.isna(value)
+                             else ("%%.%df" % decimals) % float(value))
+            else:
+                cells.append(_latex_escape(value))
+        lines.append("    " + " & ".join(cells) + r" \\")
+    lines += [r"    \bottomrule", r"  \end{tabular}"]
+    if note:
+        lines.append(r"  \par\smallskip\footnotesize{%s}" % _latex_escape(note))
+    lines += [r"\end{table}", ""]
+    return "\n".join(lines)
+
+
+THESIS_TABLES = {
+    "configuration": ("step12_configurations",
+                      "The eight configurations compared in Step 12, and the "
+                      "single component each one isolates."),
+    "training_setup": ("step12_training_setup",
+                       "Training protocol per configuration. Every shared "
+                       "setting is identical; the recorded columns come from "
+                       "each run's own metrics.json."),
+    "sanity": ("step12_sanity_baselines",
+               "Sanity baselines. These are not models under comparison: they "
+               "are the floor, and the leakage test."),
+    "comparison": ("step12_comparison",
+                   "Test-set comparison of the eight configurations. The "
+                   "duplicate-free columns exclude test flows whose exact "
+                   "feature vector also occurs in training."),
+    "per_class": ("step12_per_class_f1",
+                  "Per-class F1 on the full test set, with the test support "
+                  "of each class."),
+    "per_class_free": ("step12_per_class_f1_duplicate_free",
+                       "Per-class F1 on the duplicate-free subset."),
+    "head_to_head": ("step12_head_to_head",
+                     "Head-to-head differences between configurations that "
+                     "differ in exactly one component."),
+    "per_class_difference": ("step12_head_to_head_per_class",
+                             "Per-class F1 differences for the same pairs."),
+    "zero_recall": ("step12_zero_recall",
+                    "Configurations with a G-mean of zero, and the class each "
+                    "one never detects."),
+    "provenance": ("step12_provenance",
+                   "Provenance: the saved file behind every published number, "
+                   "with its SHA-256."),
+    "seeds": ("step12_seeds",
+              "Across-seed means and standard deviations, where more than one "
+              "seed was trained."),
+}
+
+
+def export_thesis(tables: dict[str, pd.DataFrame], folder: Path | None = None,
+                  note: str | None = None, verbose: bool = True
+                  ) -> dict[str, str]:
+    """Write every supplied table as CSV and as a booktabs .tex file."""
+    folder = (config.usable_output_dir(config.STEP12_THESIS_DIR)
+              if folder is None else Path(folder))
+    if folder is None:
+        if verbose:
+            print("  [SKIP]  the thesis folder is not usable here -- %s"
+                  % config.why_unusable(config.STEP12_THESIS_DIR))
+        return {}
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    written: dict[str, str] = {}
+    for key, frame in tables.items():
+        if frame is None or not len(frame):
+            continue
+        stem, caption = THESIS_TABLES.get(
+            key, ("step12_%s" % key, "Step 12 -- %s." % key.replace("_", " ")))
+        csv_path = folder / ("%s.csv" % stem)
+        tex_path = folder / ("%s.tex" % stem)
+        frame.to_csv(csv_path, index=False)
+        tex_path.write_text(to_latex(frame, caption, stem, note=note),
+                            encoding="utf-8")
+        written["%s.csv" % stem] = str(csv_path)
+        written["%s.tex" % stem] = str(tex_path)
+    if verbose and written:
+        print("  [SAVE]  %d thesis files in %s" % (len(written), folder))
+    return written
+
+
+# ===========================================================================
+# 12.7b  THE COMPLETE STEP 12 RUN -- eight rows, verified against disk
+# ===========================================================================
+def verify_rows_against_disk(table: pd.DataFrame,
+                             order: Sequence[tuple[str, str]] | None = None,
+                             tolerance: float = 1e-9) -> pd.DataFrame:
+    """Every number in the table against the metrics.json it came from.
+
+    `check_rows_unchanged` already does this against the published figures in
+    config; this is the other half of the question -- does the rendered table
+    equal the file on disk RIGHT NOW -- and it is what makes a quoted number
+    traceable.
+    """
+    order = config.STEP12_DISPLAY_ORDER if order is None else order
+    rows = []
+    for key, label in order:
+        metrics = load_result(key)
+        if metrics is None:
+            rows.append({"config": label, "metrics.json": "(absent)",
+                         "columns compared": 0, "largest difference": np.nan,
+                         "result": "[SKIP]"})
+            continue
+        built = _row_from_metrics(label, metrics)
+        part = table[table["config"] == label]
+        if not len(part):
+            rows.append({"config": label,
+                         "metrics.json": str(result_path(key)),
+                         "columns compared": 0, "largest difference": np.nan,
+                         "result": "[FAIL]"})
+            continue
+        line = part.iloc[0]
+        worst, compared = 0.0, 0
+        for column, value in built.items():
+            if column == "config" or column not in table.columns:
+                continue
+            left = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+            right = pd.to_numeric(pd.Series([line[column]]),
+                                  errors="coerce").iloc[0]
+            if pd.isna(left) and pd.isna(right):
+                continue
+            if pd.isna(left) or pd.isna(right):
+                worst = max(worst, float("inf"))
+                compared += 1
+                continue
+            worst = max(worst, abs(float(left) - float(right)))
+            compared += 1
+        rows.append({"config": label, "metrics.json": str(result_path(key)),
+                     "columns compared": compared,
+                     "largest difference": worst,
+                     "result": "[OK]" if worst <= tolerance else "[FAIL]"})
+    return pd.DataFrame(rows)
+
+
+def run_step12_complete(majority_accuracy: float | None = None,
+                        random_macro_f1: float | None = None,
+                        verbose: bool = True) -> dict[str, Any]:
+    """12.7 to 12.9: the eight-row comparison, its checks, tables and figures.
+
+    Nothing is trained and nothing is recomputed from a model: every row is
+    read from a saved metrics.json, and `verify_rows_against_disk` proves the
+    rendered table equals those files to 1e-9 before anything is written.
+    """
+    if verbose:
+        show_title("12.7 -- the eight-configuration comparison", level=4)
+    built = build_full_comparison(verbose=False)
+    table = built["table"]
+    marked = mark_best(table)
+    built["per_class"] = per_class_table()
+    per_class_free = per_class_table(duplicate_free=True)
+    zero_recall = zero_recall_diagnostic()
+    head = all_head_to_heads_8(table)
+    per_class_difference = per_class_difference_8(built["per_class"])
+    verified = verify_rows_against_disk(table)
+    unchanged, unchanged_ok = check_rows_unchanged(built, verbose=False)
+    configuration = configuration_table_8()
+    setup = training_setup_table()
+
+    out: dict[str, Any] = {
+        "built": built, "comparison": table, "comparison_marked": marked,
+        "per_class": built["per_class"], "per_class_free": per_class_free,
+        "zero_recall": zero_recall, "head_to_head": head,
+        "per_class_difference": per_class_difference,
+        "verified": verified, "unchanged": unchanged,
+        "unchanged_ok": unchanged_ok, "configuration": configuration,
+        "training_setup": setup, "missing": built["missing"],
+        "majority_accuracy": majority_accuracy,
+        "random_macro_f1": random_macro_f1,
+    }
+
+    folder = prepare_output_dir(config.STEP12_OUTPUT_DIR,
+                                "the Step 12 comparison", verbose=verbose)
+    if folder is None:
+        out.update({"status": "skipped_not_windows", "ok": False})
+        return out
+    folder = Path(folder)
+    names = config.STEP12_FULL_FILES
+    table.to_csv(folder / names["comparison"], index=False)
+    marked.to_csv(folder / names["comparison_marked"], index=False)
+    if len(built["per_class"]):
+        built["per_class"].to_csv(folder / names["per_class"], index=False)
+    if len(per_class_free):
+        per_class_free.to_csv(folder / names["per_class_free"], index=False)
+    if len(zero_recall):
+        zero_recall.to_csv(folder / names["zero_recall"], index=False)
+    if len(head):
+        head.to_csv(folder / names["head_to_head"], index=False)
+    unchanged.to_csv(folder / names["unchanged_check"], index=False)
+    configuration.to_csv(folder / "configuration_table_8configs.csv",
+                         index=False)
+    setup.to_csv(folder / "training_setup_8configs.csv", index=False)
+    verified.to_csv(folder / "row_vs_disk_check.csv", index=False)
+    if len(per_class_difference):
+        per_class_difference.to_csv(
+            folder / "head_to_head_per_class_8configs.csv", index=False)
+
+    thesis = config.usable_output_dir(config.STEP12_THESIS_DIR)
+    out["charts"] = draw_figures_8(built, folder,
+                                   majority_accuracy=majority_accuracy,
+                                   random_macro_f1=random_macro_f1,
+                                   thesis=thesis, verbose=verbose)
+    out.update({"status": "written", "folder": str(folder),
+                "ok": bool(unchanged_ok
+                           and not (verified["result"] == "[FAIL]").any())})
+    if verbose:
+        show_table(marked, all_columns=True,
+                   note="Eight configurations, every row read from its saved "
+                        "metrics.json. `*` marks the best value in a column on "
+                        "every tied row; lower is better for the FPR, the "
+                        "parameter count and the times."
+                        + ("" if majority_accuracy is None else
+                           " The majority-class accuracy is %.4f."
+                           % majority_accuracy))
     return out

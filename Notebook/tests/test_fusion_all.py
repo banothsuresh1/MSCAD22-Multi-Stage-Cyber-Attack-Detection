@@ -36,7 +36,7 @@ BENIGN = [0]
 
 # the real internal keys, so a rename in config.py breaks these tests loudly
 KEYS = [k for k, _label in config.STEP12_DISPLAY_ORDER]
-PROPOSED, APPROACH2, B1, B2, B3, B4, B5 = KEYS
+PROPOSED, APPROACH2, B1, B2, B3, B4, B5, B6 = KEYS
 
 
 @pytest.fixture(autouse=True)
@@ -146,7 +146,7 @@ def test_each_model_keeps_its_own_colour_whatever_the_subset():
     """Colour follows the model, not its position in the current subset."""
     colours = {k: fa.model_colour(k) for k in KEYS}
 
-    assert len(set(colours.values())) == len(KEYS)      # seven distinct hues
+    assert len(set(colours.values())) == len(KEYS)      # one distinct hue each
     assert fa.model_colour(B5) == colours[B5]
 
 
@@ -558,10 +558,10 @@ def test_a_deleted_step13_file_is_caught(tmp_path):
 
 
 def test_fusion_models_is_not_read_as_fusion_all_models():
-    """Step 13 still fuses three models; the addendum offers seven."""
+    """Step 13 still fuses three models; the addendum offers all of them."""
     assert list(config.FUSION_MODELS) == ["proposed", "baseline2_ae_lstm",
                                           "baseline3_cnn_lstm"]
-    assert len(config.FUSION_ALL_MODELS) == 7
+    assert len(config.FUSION_ALL_MODELS) == 8
 
 
 # ===========================================================================

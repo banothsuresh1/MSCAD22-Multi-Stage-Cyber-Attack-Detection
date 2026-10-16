@@ -39,6 +39,11 @@ def _in_tmp(tmp_path, monkeypatch):
                             tmp_path / ("step%d" % step))
     monkeypatch.setattr(config, "STEP11B_OUTPUT_DIR",
                         tmp_path / "step11_attention", raising=False)
+    # Baseline 6 keeps its own folder in config.py; point it under tmp_path so
+    # write_result() reaches it exactly like the other Step 12 configurations.
+    monkeypatch.setattr(config, "STEP12_B6_OUTPUT_DIR",
+                        tmp_path / "step12" / config.BASELINE6_NAME,
+                        raising=False)
     monkeypatch.setattr(config, "STEP12_EXPECTED_ROWS", {})
 
 
@@ -100,7 +105,7 @@ def test_every_row_is_present_in_the_display_order(tmp_path):
 
     assert list(built["table"]["config"]) == [l for _k, l
                                               in config.STEP12_DISPLAY_ORDER]
-    assert len(built["table"]) == 7
+    assert len(built["table"]) == 8
     assert built["missing"] == []
     for column in cmp.COLUMNS:
         assert column in built["table"].columns
@@ -142,7 +147,7 @@ def test_building_the_table_never_trains(tmp_path, monkeypatch):
     monkeypatch.setattr("src.mscad.experiments.train_classifier", explode)
 
     built = cmp.build_full_comparison(verbose=False)
-    assert len(built["metrics"]) == 7
+    assert len(built["metrics"]) == 8
 
 
 def test_a_missing_result_names_the_step_that_produces_it():
@@ -165,7 +170,7 @@ def test_the_rebuilt_rows_equal_the_saved_metrics(tmp_path):
     assert ok is True
     assert set(frame["result"]) <= {"[OK]", "[SKIP]"}
     exact = frame[frame["check"].str.startswith("exact")]
-    assert len(exact) == 7
+    assert len(exact) == 8
     assert (exact["result"] == "[OK]").all()
 
 
@@ -410,7 +415,7 @@ def test_the_new_files_never_share_a_name_with_an_existing_one():
 
 
 def test_the_display_order_block_holds_the_documented_defaults():
-    assert len(config.STEP12_DISPLAY_ORDER) == 7
+    assert len(config.STEP12_DISPLAY_ORDER) == 8
     assert config.NOT_TRAINED_TEXT == "not yet trained - run 10.2"
     assert set(config.STEP12_ISOLATES) == {k for k, _l
                                            in config.STEP12_DISPLAY_ORDER}
