@@ -36,7 +36,7 @@ LABELS = {0: "Normal", 1: "Port_Scan", 2: "Brute_Force"}
 N_CLASSES = 3
 BENIGN = [0]
 KEYS = [k for k, _label in config.STEP12_DISPLAY_ORDER]
-PROPOSED, APPROACH2, B1, B2, B3, B4, B5 = KEYS
+PROPOSED, APPROACH2, B1, B2, B3, B4, B5, B6 = KEYS
 
 MODULE_PATH = (Path(__file__).resolve().parent.parent / "src" / "mscad"
                / "explainability_all.py")

@@ -287,11 +287,57 @@ def _load_baseline5(key: str) -> dict[str, Any]:
                           _saved_probabilities(key), model_path)
 
 
+def _load_baseline6(key: str) -> dict[str, Any]:
+    """Baseline 6: features -> Baseline 4's encoder -> PCA -> CNN-LSTM.
+
+    The same composition Baseline 4 gets, with Baseline 6's classifier: the
+    encoder and the PCA are Baseline 4's saved ones (or, when
+    B6_PCA_COMPONENTS is an integer, the PCA Baseline 6 fitted on the training
+    latents and saved in its own folder), and the PCA goes INSIDE the
+    differentiated function as a frozen affine layer so the attributions land
+    on the original named features.
+    """
+    from . import experiments as xp
+    from . import experiments_baseline6 as b6
+
+    place = b6.folder()
+    if place is None:
+        raise XaiAllError("the Baseline 6 output folder is not usable here -- %s"
+                          % config.why_unusable(config.STEP12_B6_OUTPUT_DIR))
+    names = config.BASELINE6_FILES
+    model_path = place / names["model"]
+    if not model_path.exists():
+        raise XaiAllError("the Baseline 6 classifier is missing:\n    %s"
+                          % model_path)
+
+    pipeline = b6.load_baseline4_pipeline(verbose=False)
+    pca = pipeline["pca"]
+    own_pca = place / names["pca"]
+    if own_pca.exists():                        # B6 fitted its own, so use it
+        from joblib import load as joblib_load
+        pca = joblib_load(own_pca)
+
+    classifier = xai._keras().models.load_model(model_path)
+    block = pca_as_linear_layer(pipeline["encoder"], pca,
+                                name="baseline6_encoder_pca")
+    order = pipeline["order"]
+    source = xp.load_feature_source(config.BASELINE6_SPEC["feature_source"],
+                                    verbose=False)
+    bundle = _composed_from(classifier, block, source["X_train"][order],
+                            source["X_test"][order], key,
+                            _saved_probabilities(key), model_path)
+    bundle["pca"] = pca
+    return bundle
+
+
 def load_composed_any(key: str, verbose: bool = False) -> dict[str, Any]:
     """The composed model for one configuration, on its ORIGINAL features."""
     approach2 = getattr(config, "APPROACH2_KEY", "approach2_attention")
+    baseline6 = getattr(config, "BASELINE6_NAME", "baseline6_ae_pca_cnn_lstm")
     if key == approach2:
         bundle = _load_approach2(key)
+    elif key == baseline6:
+        bundle = _load_baseline6(key)
     elif key == "baseline4_ae_pca_lstm":
         bundle = _load_baseline4(key)
     elif key == config.BASELINE5_NAME:

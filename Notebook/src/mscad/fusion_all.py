@@ -1868,3 +1868,17 @@ def run_step13all(overwrite: bool | None = None, keys: Sequence[str] | None = No
         print("[%s]  existing Step 13 outputs unchanged"
               % ("OK" if after_ok else "FAIL"))
     return out
+
+
+# ===========================================================================
+# Step 12 completion -- the eighth configuration's hue  (APPENDED, add-only)
+# ===========================================================================
+# Baseline 6 joins STEP12_DISPLAY_ORDER and FUSION_ALL_MODELS, so the series
+# above would wrap at index 7 and hand B6 Approach 1's blue.  Appending the
+# eighth hue from config.MODEL_COLOURS keeps one colour per model.  No line
+# above is changed: model_colour() reads this list at call time.
+_eighth_hue = (getattr(config, "MODEL_COLOURS", {}) or {}).get(
+    getattr(config, "BASELINE6_NAME", ""), "")
+if _eighth_hue and _eighth_hue not in _SERIES7:
+    _SERIES7 = _SERIES7 + [_eighth_hue]
+del _eighth_hue

@@ -323,18 +323,33 @@ def step12_cells():
     return cells, range(starts[0], ends[0])
 
 
-def test_the_step_12_run_cells_go_through_the_quiet_loader():
+def test_the_step_12_run_cells_never_call_a_runner_that_prints_the_old_tables():
+    """The Step 12 completion goes one step further than the quiet loader.
+
+    12.3 to 12.5 now LOAD the finished configurations and print one status line
+    each -- no runner is called from Step 12 at all, so the superseded tables
+    cannot be printed and no existing model can be retrained by re-running a
+    cell.  The quiet loader itself is unchanged and still available for a
+    configuration that has never been trained; what this test guards is that
+    no Step 12 cell calls a runner bare, which is what printed the old tables.
+    """
     cells, span = step12_cells()
     code = "\n".join(cells[i].source for i in span
                      if cells[i].cell_type == "code")
 
     for runner in ("experiments.run_step12", "run_step12_with_baseline4",
                    "run_baseline5_comparison"):
-        assert "%s," % runner in code or "%s)" % runner in code
-        # ... and only as an argument to the quiet loader: the old cells read
-        # `step12 = experiments.run_step12()`, which would print the tables
         assert "= %s()" % runner not in code
-    assert code.count("load_step12_quiet") == 3
+        assert "%s(" % runner not in code      # not called from Step 12 at all
+
+
+def test_the_quiet_loader_is_still_there_for_an_untrained_configuration():
+    """Nothing about the loader itself changed; only who calls it."""
+    import inspect
+
+    parameter = inspect.signature(cmp.load_step12_quiet).parameters
+    assert "runner" in parameter and "show" in parameter
+    assert parameter["show"].default is True
 
 
 def test_step_12_shows_the_superseded_tables_no_more():
@@ -344,8 +359,14 @@ def test_step_12_shows_the_superseded_tables_no_more():
 
     assert "architecture_table()" not in code      # the 5- and 6-row versions
     assert 'e["label"]' not in code                # the 4-row version
-    assert code.count("configuration_table()") == 1   # 12.1 keeps its own
-    assert code.count("run_step12_full()") == 1       # and 12.5 its own
+    # 12.1 and 12.7 each keep exactly one table of their own.  The Step 12
+    # completion replaced the 7-row pair with the 8-row pair, so the names
+    # moved; the property this test exists for -- one, and only one, of each --
+    # is the same.
+    assert code.count("configuration_table_8()") == 1
+    assert code.count("configuration_table()") == 0
+    assert code.count("run_step12_complete(") == 1
+    assert code.count("run_step12_full()") == 0
 
 
 def test_the_notebook_carries_no_stored_outputs():

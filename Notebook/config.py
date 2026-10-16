@@ -1767,3 +1767,115 @@ STEP14ALL_FILES = {
 }
 
 DIRS_TO_CREATE.append(STEP14ALL_OUTPUT_DIR)
+
+
+# ---------------- Step 12 completion - B6, provenance, sanity ----------------
+# APPENDED.  Nothing above this line was changed: EXPERIMENTS keeps its four
+# entries, FUSION_MODELS still names the three models Step 13 fuses, and every
+# existing key keeps its value.  The three lists below are EXTENDED in place
+# rather than rewritten, so a reader can see exactly what was added.
+#
+# Baseline 6: AE -> PCA -> CNN-LSTM.  It differs from Baseline 4 only by the
+# classifier (CNN-LSTM instead of LSTM) and from Baseline 1 only by the PCA
+# stage, so the pair B4/B6 isolates the CNN front end on PCA features and the
+# pair B1/B6 isolates PCA before an unchanged CNN-LSTM.
+BASELINE6_NAME = "baseline6_ae_pca_cnn_lstm"
+BASELINE6_LABEL = "B6: AE -> PCA -> CNN-LSTM"
+STEP12_B6_OUTPUT_DIR = OUTPUTS_DIR / "step12_baseline6"
+
+# "same_as_B4" reuses Baseline 4's SAVED PCA, unchanged and never refitted, so
+# B4 and B6 sit in the identical feature space.  An integer instead fits a NEW
+# PCA with that many components on the B4 encoder's TRAINING latents only,
+# writes it inside the B6 folder, and the row label then reads "PCA(k)";
+# Baseline 4's own pca.joblib is never touched either way.
+B6_PCA_COMPONENTS = "same_as_B4"
+
+BASELINE6_SPEC = {
+    "name": BASELINE6_NAME,
+    "label": BASELINE6_LABEL,
+    "feature_source": BASELINE4_AE_FEATURES,   # the same inputs B4 starts from
+    "use_ae": True,
+    "use_pca": True,
+    "model_type": "cnn_lstm",                  # the ONE difference from B4
+    "reuse_encoder_from": "baseline4_ae_pca_lstm",
+}
+
+# False = a finished Baseline 6 is read back from disk instead of retrained.
+OVERWRITE_BASELINE6 = False
+
+BASELINE6_FILES = {
+    "model": "model.keras",
+    "pca": "pca.joblib",                       # only when B6_PCA_COMPONENTS is an int
+    "pca_variance": "pca_variance.csv",
+    "history": "history.csv",
+    "loss_curve": "loss_curve.png",
+    "macro_f1_curve": "val_macro_f1_curve.png",
+    "model_card": "model_card.json",
+    "metrics": "metrics.json",
+    "per_class": "per_class_report.csv",
+    "confusion_counts": "confusion_matrix_counts.csv",
+    "confusion_rownorm": "confusion_matrix_rownorm.csv",
+    "predictions": "predictions.csv",
+    "protocol": "protocol_checks.csv",
+    "pca_length": "pca_length_check.csv",
+}
+
+# --- the display order, extended ------------------------------------------
+# Appended rather than rewritten, so the first seven rows keep the positions
+# every saved Step 12, 13 and 14 file already uses.
+STEP12_DISPLAY_ORDER = STEP12_DISPLAY_ORDER + [(BASELINE6_NAME, BASELINE6_LABEL)]
+STEP12_ISOLATES[BASELINE6_NAME] = ("a CNN front end on the PCA features "
+                                   "(B4 + CNN, B1 + PCA)")
+
+# --- the Step 13.8 and 14.9 lists, extended -------------------------------
+# FUSION_MODELS is NOT touched: Step 13 still fuses Approach 1, B2 and B3.
+FUSION_ALL_MODELS = FUSION_ALL_MODELS + [BASELINE6_NAME]
+XAI_ALL_MODELS = XAI_ALL_MODELS + [BASELINE6_NAME]
+MODEL_COLOURS[BASELINE6_NAME] = "#a06a2c"      # the eighth hue: brown,
+# checked with the other seven for the chroma floor and colour-blind
+# separation against the chart surface (worst adjacent pair dE 9.1 protan)
+
+# --- 12.0  the retraining lock --------------------------------------------
+# True = a training call for a configuration whose metrics.json already exists
+# is REFUSED, whatever its OVERWRITE_* flag says.  This exists because a model
+# silently retrained after its metrics were published makes every table that
+# quotes it wrong.  Set it to False deliberately when a retrain is intended.
+LOCK_TRAINED_MODELS = True
+
+STEP12_PROVENANCE_FILES = {
+    "provenance": "provenance.csv",
+    "consistency": "provenance_consistency.csv",
+    "approach1": "approach1_consistency.csv",
+    "report": "provenance_report.md",
+}
+
+# Where a backup of an earlier run would be, if one exists.  Any folder under
+# DATA_ROOT whose name starts with this is read and REPORTED beside the current
+# numbers; nothing is ever restored or chosen automatically.
+BACKUP_PREFIX = "outputs_backup"
+
+# --- 12.2  the sanity baselines -------------------------------------------
+STEP12_SANITY_OUTPUT_DIR = OUTPUTS_DIR / "step12_sanity"
+SANITY_FILES = {
+    "table": "sanity_baselines.csv",
+    "model": "label_shuffle_model.keras",
+    "history": "label_shuffle_history.csv",
+    "metrics": "label_shuffle_metrics.json",
+    "predictions": "label_shuffle_predictions.csv",
+    "permutation": "label_shuffle_permutation.csv",
+    "report": "sanity_report.md",
+}
+# The label-shuffle model must not beat chance by more than this in macro-F1,
+# or the pipeline is leaking the label somewhere.
+SANITY_LEAKAGE_MARGIN = 0.10
+
+# --- 12.10  extra seeds ----------------------------------------------------
+# Only used when N_SEEDS >= 3; seed 0's folders are never overwritten.
+STEP12_SEEDS_OUTPUT_DIR = OUTPUTS_DIR / "step12_seeds"
+
+# --- the thesis exports ----------------------------------------------------
+STEP12_THESIS_DIR = STEP12_OUTPUT_DIR / "thesis"
+THESIS_FIGURE_DPI = 300
+
+DIRS_TO_CREATE.extend([STEP12_B6_OUTPUT_DIR, STEP12_SANITY_OUTPUT_DIR,
+                       STEP12_THESIS_DIR])
