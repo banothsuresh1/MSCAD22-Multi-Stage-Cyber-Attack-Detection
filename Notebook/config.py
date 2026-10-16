@@ -1903,3 +1903,82 @@ THESIS_FIGURE_DPI = 300
 
 DIRS_TO_CREATE.extend([STEP12_B6_OUTPUT_DIR, STEP12_SANITY_OUTPUT_DIR,
                        STEP12_THESIS_DIR])
+
+
+# ===========================================================================
+# ---------------- Step 12 - separate configuration files -------------------
+# ===========================================================================
+# Step 12 is also available as eight separate, individually runnable files in
+# src/mscad/experiments_step12/ -- one per configuration, each a thin wrapper
+# around the code that already trains and scores it:
+#
+#     python -m src.mscad.experiments_step12.approach1
+#     python -m src.mscad.experiments_step12.baseline6
+#
+# This block is APPEND ONLY and redefines nothing: where a setting this folder
+# needs already exists above, the line below reads it rather than assigning it
+# a second time.  Two assignments of the same flag would mean that editing one
+# of them silently has no effect, which is exactly the kind of accident the
+# retraining lock exists to prevent.
+
+# The lock itself, defined in the Step 12 completion block above.  True = a
+# configuration whose metrics.json exists is never retrained, whatever its
+# OVERWRITE_* flag says; its file loads the saved result and reports
+# "loaded (locked)".  Set it to False, deliberately, to train something.
+LOCK_TRAINED_MODELS = globals().get("LOCK_TRAINED_MODELS", True)
+
+# Where each configuration file writes its manifest.json: one NEW folder per
+# configuration, under outputs\step12\, named after the file rather than after
+# the internal key -- outputs\step12\approach1\, ...\baseline6\ and so on.
+# They sit BESIDE the folders the finished runs own, never inside them, so a
+# manifest cannot overwrite a saved model, metric or prediction.
+STEP12_CONFIG_DIR = STEP12_OUTPUT_DIR
+
+# key -> the module in src/mscad/experiments_step12/ that runs it, and the
+# folder name its manifest goes in.  One configuration, one name, everywhere.
+STEP12_CONFIG_FILES = {
+    "proposed": "approach1",
+    APPROACH2_KEY: "approach2",
+    "baseline1_ae_cnn_lstm": "baseline1",
+    "baseline2_ae_lstm": "baseline2",
+    "baseline3_cnn_lstm": "baseline3",
+    "baseline4_ae_pca_lstm": "baseline4",
+    "baseline5": "baseline5",
+    BASELINE6_NAME: "baseline6",
+}
+
+# Baseline 6's own output folder.  This is an ALIAS of the folder B6 already
+# uses (STEP12_B6_OUTPUT_DIR), not a new location: pointing it somewhere else
+# would make the lock believe B6 had never been trained and retrain it, which
+# rule 2 forbids.  Everything B6 writes -- model, history, curves, model card,
+# metrics, per-class report, confusion matrices, predictions -- goes here.
+B6_OUTPUT_DIR = STEP12_B6_OUTPUT_DIR
+
+# How many PCA components Baseline 6 uses: "same_as_B4" reuses Baseline 4's
+# fitted pca.joblib byte for byte, an int fits a NEW PCA with that many
+# components on the TRAINING latents only.  Already set above; read here so
+# this block documents it without redefining it.
+B6_PCA_COMPONENTS = globals().get("B6_PCA_COMPONENTS", "same_as_B4")
+
+# False = a finished Baseline 6 is read back from disk instead of retrained.
+# The same switch as OVERWRITE_BASELINE6, under the name the configuration
+# file uses; baseline6.py passes this value to run_baseline6().
+OVERWRITE_B6 = globals().get("OVERWRITE_BASELINE6", False)
+
+# One fixed colour per configuration, used by every Step 12 figure and legend
+# so a configuration keeps its hue whatever subset a chart shows.  This is the
+# SAME mapping the figures read (MODEL_COLOURS) rather than a second palette:
+# two palettes would drift, and a configuration drawn in two colours across a
+# chapter is worse than no colour at all.
+CONFIG_COLOURS = dict(MODEL_COLOURS)
+
+# What this block deliberately does NOT change, because Step 13 validates
+# against it and Steps 10-14 were all computed with it:
+#   * STEP12_DISPLAY_ORDER -- already holds all eight, with the existing
+#     internal keys; Baseline 6 is its eighth row.
+#   * EXPERIMENTS          -- still the four configurations the Step 12 runner
+#     trains; Baseline 6 is NOT one of them, so re-running that loop cannot
+#     touch it.
+#   * FUSION_MODELS        -- still Step 13's three models.
+#   * FUSION_ALL_MODELS / XAI_ALL_MODELS -- already include Baseline 6, so
+#     13.8 and 14.9 cover it once they are re-run on purpose.
