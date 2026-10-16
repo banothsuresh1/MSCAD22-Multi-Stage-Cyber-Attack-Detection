@@ -54,6 +54,8 @@ TARGETS: dict[str, dict[str, Any]] = {
         "metrics_files_block": "STEP11_FILES",
         "module": "models",
         "function": "run_step10",
+        "overwrite_flag": "OVERWRITE_STEP10",
+        "exists_function": "step10_outputs_exist",
         "rerun": "Steps 11 to 14, so every table that quotes it agrees again",
     },
     "approach2": {
@@ -63,6 +65,8 @@ TARGETS: dict[str, dict[str, Any]] = {
         "metrics_files_block": "STEP11B_FILES",
         "module": "models_attention",
         "function": "run_step10b",
+        "overwrite_flag": "OVERWRITE_STEP10B",
+        "exists_function": "step10b_outputs_exist",
         "rerun": "sections 11.x to 14, so every table that quotes it agrees "
                  "again",
     },
@@ -86,6 +90,30 @@ def is_trained(name: str) -> bool:
     """True when this model already has saved metrics in the active root."""
     path = metrics_path(name)
     return bool(path is not None and path.exists())
+
+
+def saved_model_exists(name: str) -> bool:
+    """Does Step 10 (or 10.2) already have its model, history and card saved?"""
+    import importlib
+
+    target = TARGETS[name]
+    module = importlib.import_module("%s.%s" % (__package__, target["module"]))
+    return bool(getattr(module, target["exists_function"])())
+
+
+def would_train(name: str, overwrite: bool | None = None) -> bool:
+    """Would a call to this runner TRAIN, or would it only load?
+
+    `run_step10` and `run_step10b` are load-or-train functions: with their
+    OVERWRITE_* flag off and their outputs on disk they return
+    `load_step10()` and touch nothing.  The lock exists to stop a RETRAIN, so
+    refusing that load is wrong -- it turns a harmless cell into an exception
+    and tells the reader to change a flag that was not the problem.
+    """
+    target = TARGETS[name]
+    if overwrite is None:
+        overwrite = getattr(config, target["overwrite_flag"], False)
+    return bool(overwrite or not saved_model_exists(name))
 
 
 def lock_is_on() -> bool:
@@ -131,10 +159,18 @@ def lock_table() -> pd.DataFrame:
             "trained by": "%s.%s()" % (target["module"], target["function"]),
             "metrics.json": "" if path is None else str(path),
             "saved metrics exist": is_trained(name),
-            "training now would": ("be REFUSED" if locked(name)
-                                   else "run (no saved metrics yet)"
-                                   if not is_trained(name)
-                                   else "run (LOCK_TRAINED_MODELS is False)"),
+            "saved model exists": saved_model_exists(name),
+            # one column for both rows: naming the flag per row would give the
+            # other row a NaN
+            "overwrite flag": "%s = %s" % (
+                target["overwrite_flag"],
+                getattr(config, target["overwrite_flag"], False)),
+            "running it now would": (
+                "LOAD the saved model (it trains nothing)"
+                if not would_train(name) else
+                "be REFUSED (it would retrain)" if locked(name) else
+                "TRAIN (no saved metrics yet)" if not is_trained(name) else
+                "TRAIN (LOCK_TRAINED_MODELS is False)"),
         })
     return pd.DataFrame(rows)
 
@@ -166,7 +202,13 @@ def install(verbose: bool = True) -> dict[str, str]:
 
         def make(name=name, original=original):
             def wrapper(*args: Any, **kwargs: Any) -> Any:
-                if locked(name):
+                # Only a call that would TRAIN is refused.  With the
+                # OVERWRITE_* flag off and the model already saved, this
+                # runner loads it and changes nothing, so it is let through.
+                overwrite = kwargs.get("overwrite")
+                if args:                       # overwrite is the 1st argument
+                    overwrite = args[0]
+                if locked(name) and would_train(name, overwrite):
                     raise TrainingLocked(lock_message(name))
                 return original(*args, **kwargs)
             wrapper.__name__ = getattr(original, "__name__", "wrapper")
