@@ -467,6 +467,12 @@ def test_the_lock_default_in_config_is_on():
     assert config.LOCK_TRAINED_MODELS is True
 
 
+def test_a_finished_sanity_model_is_loaded_rather_than_retrained():
+    """The sanity macro-F1 is quoted in the write-up, so it has to be stable
+    across re-runs rather than retrained into a slightly different number."""
+    assert config.OVERWRITE_STEP12_SANITY is False
+
+
 # ===========================================================================
 # 12.2  the sanity baselines
 # ===========================================================================

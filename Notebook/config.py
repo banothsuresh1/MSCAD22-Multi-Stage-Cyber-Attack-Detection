@@ -1885,6 +1885,14 @@ SANITY_FILES = {
 # or the pipeline is leaking the label somewhere.
 SANITY_LEAKAGE_MARGIN = 0.10
 
+# False = a finished label-shuffle model is read back from disk instead of
+# retrained.  It matters more here than it looks: the sanity table's macro-F1
+# is a number the write-up quotes, and a model retrained on every re-run gives
+# a slightly different one each time.  Trained once, loaded afterwards -- the
+# same convention as every other configuration.  Set it True deliberately to
+# retrain the sanity model.
+OVERWRITE_STEP12_SANITY = False
+
 # --- 12.10  extra seeds ----------------------------------------------------
 # Only used when N_SEEDS >= 3; seed 0's folders are never overwritten.
 STEP12_SEEDS_OUTPUT_DIR = OUTPUTS_DIR / "step12_seeds"
