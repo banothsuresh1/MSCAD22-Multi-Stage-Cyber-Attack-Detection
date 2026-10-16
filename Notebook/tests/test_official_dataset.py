@@ -552,3 +552,105 @@ def test_the_notebook_cells_for_3_1_to_3_7_are_mode_aware():
             assert "OWN_STEP3_SKIP_NOTE" in cell.source, cell["id"]
             guarded += 1
     assert guarded == 5, guarded
+
+
+# ===========================================================================
+# 8. the readable Protocol column in preprocessing.csv
+# ===========================================================================
+# The second bug of the same shape: official mode left Protocol out of
+# COMBINED_ID_COLUMNS, so the readable text column was never derived and a
+# Step 4 cell failed with `KeyError: 'Protocol'`. It is derived here too now --
+# and when the dataset has no Protocol column at all there are no one-hot
+# features to derive it from, which is reported rather than raised.
+def combined_parts(with_one_hot=True, rows=6):
+    """The three frames build_combined() joins."""
+    features = pd.DataFrame({
+        "Flow Duration": np.arange(rows, dtype="float64"),
+        "Tot Fwd Pkts": np.ones(rows),
+    })
+    if with_one_hot:
+        features["Protocol_ICMP"] = [0] * rows
+        features["Protocol_TCP"] = [1] * rows
+        features["Protocol_UDP"] = [0] * rows
+        features["Protocol_other"] = [0] * rows
+    labels = pd.DataFrame({
+        "Label": ["Normal"] * rows,
+        "Label_encoded": [3] * rows,
+        "Label_binary": [0] * rows})
+    metadata = pd.DataFrame({
+        "Flow ID": ["f%d" % i for i in range(rows)],
+        "Src IP": ["10.0.0.1"] * rows,
+        "Dst IP": ["10.0.0.2"] * rows,
+        # ports must stay integers: build_combined casts COMBINED_INT_COLUMNS
+        "Src Port": np.arange(40000, 40000 + rows, dtype="int64"),
+        "Dst Port": np.full(rows, 22, dtype="int64"),
+        "Timestamp": ["2022-01-01 00:00:00"] * rows,
+        "Orig_Row": np.arange(rows, dtype="int64")})
+    return features, labels, metadata
+
+
+def test_official_mode_derives_the_readable_protocol_column():
+    from src.mscad import preprocessing as pp
+
+    features, labels, metadata = combined_parts(with_one_hot=True)
+
+    combined = pp.build_combined(features, labels, metadata, verbose=False)
+
+    assert "Protocol" in combined.columns
+    assert set(combined["Protocol"]) == {"TCP"}
+    # the one-hot features are replaced by the readable column in this view
+    for name in config.PROTOCOL_TEXT_FROM_ONE_HOT:
+        assert name not in combined.columns, name
+    assert "Protocol" in config.COMBINED_ID_COLUMNS
+    assert "Protocol" not in config.COMBINED_METADATA_ID_COLUMNS
+
+
+def test_a_dataset_with_no_protocol_column_is_reported_not_raised(capsys):
+    """The official file may have no Protocol column; that is a fact, not a bug."""
+    from src.mscad import preprocessing as pp
+
+    features, labels, metadata = combined_parts(with_one_hot=False)
+
+    combined = pp.build_combined(features, labels, metadata, verbose=True)
+    printed = capsys.readouterr().out
+
+    assert "Protocol" not in combined.columns
+    assert "No readable `Protocol` column" in printed
+    assert "has no Protocol column" in printed
+    assert "Flow Duration" in combined.columns       # the flows are unchanged
+    assert len(combined) == 6
+
+
+def test_own_mode_still_fails_loudly_when_its_one_hots_are_missing(monkeypatch):
+    """There, a missing one-hot means Step 4's encoding is broken."""
+    from src.mscad import preprocessing as pp
+
+    monkeypatch.setattr(config, "DATASET_SOURCE", "own")
+    monkeypatch.setattr(config, "COMBINED_ID_COLUMNS", ["Protocol"])
+    monkeypatch.setattr(config, "COMBINED_METADATA_ID_COLUMNS", [])
+    features, labels, _metadata = combined_parts(with_one_hot=False)
+
+    with pytest.raises(pp.PreprocessingError) as error:
+        pp.build_combined(features, labels, None, verbose=False)
+
+    assert "cannot build the readable `Protocol` column" in str(error.value)
+    assert "OVERWRITE_STEP4 = True" in str(error.value)
+
+
+def test_the_protocol_check_cell_guards_on_the_column_being_there():
+    nbformat = pytest.importorskip("nbformat")
+    notebook = (Path(__file__).resolve().parent.parent / "notebooks"
+                / "MSCAD_Pipeline.ipynb")
+    if not notebook.exists():                  # pragma: no cover
+        pytest.skip("the notebook is not in this checkout")
+    nb = nbformat.read(str(notebook), as_version=4)
+
+    cells = [c for c in nb.cells
+             if c.cell_type == "code" and 'final["Protocol"]' in c.source]
+
+    assert len(cells) == 1
+    source = cells[0].source
+    assert '"Protocol" not in final.columns' in source
+    assert "[SKIP]" in source
+    assert source.index('"Protocol" not in final.columns') < source.index(
+        'final["Protocol"].value_counts()')

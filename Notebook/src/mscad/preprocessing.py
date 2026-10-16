@@ -851,6 +851,27 @@ def build_combined(features: pd.DataFrame, labels: pd.DataFrame,
             getattr(config, "DATASET_SOURCE", "own") == "official")
     proto_name = config.COMBINED_PROTOCOL_COLUMN
     wants_protocol = proto_name in id_columns
+    # The readable Protocol column is DERIVED from the Protocol_* one-hot
+    # features, so it can only be built when those exist.  The official dataset
+    # may have no Protocol column at all, and then there is nothing to derive
+    # from: that is a fact about the dataset, reported and skipped.  In own mode
+    # the same absence means Step 4's one-hot encoding is broken, so the
+    # existing [FAIL] inside protocol_text_from_one_hot() still fires.
+    if wants_protocol and allow_missing_identifiers:
+        one_hot = list(config.PROTOCOL_TEXT_FROM_ONE_HOT)
+        missing_one_hot = [c for c in one_hot if c not in features.columns]
+        if missing_one_hot:
+            if verbose:
+                show_note("**No readable `%s` column in `%s`:** the %s dataset "
+                          "has no Protocol column, so the %s one-hot features "
+                          "it would be derived from do not exist either. The "
+                          "flows are unchanged; there is simply no protocol to "
+                          "report."
+                          % (proto_name, config.COMBINED_CSV.name,
+                             getattr(config, "DATASET_SOURCE", "own"),
+                             ", ".join(one_hot)))
+            wants_protocol = False
+            id_columns = [c for c in id_columns if c != proto_name]
     from_metadata = [c for c in id_columns if c != proto_name]
 
     parts = {"features": len(features), "labels": len(labels)}
