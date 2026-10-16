@@ -67,7 +67,9 @@ def test_a_missing_result_with_the_lock_on_stops_with_the_file_name(
     assert "has no saved result" in message
     assert str(step12_dirs / "step12" / B1 / "metrics.json") in message
     assert "set LOCK_TRAINED_MODELS = False in config.py" in message
-    assert "re-run Steps 11-14" in message
+    # 13-14, not 11-14: Step 11 evaluates Approach 1 and is not affected by
+    # retraining a Step 12 baseline; 13 and 14 are what consume it
+    assert "re-run Steps 13-14 for this dataset" in message
     assert "nothing was trained" in message
 
 
@@ -373,3 +375,127 @@ def test_every_configuration_has_one_short_name_everywhere():
     assert common.SHORT_NAMES == dict(config.STEP12_CONFIG_FILES)
     assert set(common.SHORT_NAMES) == set(KEYS)
     assert len(set(common.SHORT_NAMES.values())) == 8
+
+
+# ===========================================================================
+# the lock message, and which of the two situations it is
+# ===========================================================================
+# Each dataset has its own output root, so a configuration can be finished in
+# one and never trained in the other. The message used to say "its model and
+# metrics were produced by an earlier run" either way, which is false in a
+# fresh root -- exactly what a newly switched DATASET_SOURCE looks like.
+@pytest.fixture
+def two_roots(tmp_path, monkeypatch):
+    """Official mode, with both output roots inside tmp_path."""
+    monkeypatch.setattr(config, "DATASET_SOURCE", "official", raising=False)
+    monkeypatch.setattr(config, "RUNNING_OFFICIAL", True, raising=False)
+    monkeypatch.setattr(config, "OUTPUTS_ROOT", tmp_path / "outputs_official",
+                        raising=False)
+    monkeypatch.setattr(config, "OUTPUTS_ROOT_OFFICIAL",
+                        tmp_path / "outputs_official", raising=False)
+    monkeypatch.setattr(config, "OUTPUTS_ROOT_OWN", tmp_path / "outputs",
+                        raising=False)
+    monkeypatch.setattr(config, "STEP12_OUTPUT_DIR",
+                        tmp_path / "outputs_official" / "step12")
+    monkeypatch.setattr(config, "STEP12_CONFIG_DIR",
+                        tmp_path / "outputs_official" / "step12")
+    return tmp_path
+
+
+def write_elsewhere(tmp_path, key):
+    """The same configuration, finished in the OTHER dataset's root."""
+    folder = tmp_path / "outputs" / "step12" / key
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "metrics.json").write_text(
+        json.dumps({"full": {"f1_macro": 0.68}}), encoding="utf-8")
+    return folder / "metrics.json"
+
+
+def test_the_other_datasets_root_is_named_and_its_path_given(two_roots):
+    elsewhere = write_elsewhere(two_roots, B1)
+
+    with pytest.raises(common.Step12ConfigError) as error:
+        common.refuse_missing(B1)
+
+    message = str(error.value)
+    assert "has no saved result in the official output root" in message
+    assert "this root holds 0 of 8 Step 12 results" in message
+    assert "the own root HAS it: %s" % elsewhere in message
+
+
+def test_a_fresh_root_is_not_described_as_a_lost_result(two_roots):
+    """Nothing was produced earlier here, so nothing can be lost."""
+    write_elsewhere(two_roots, B1)
+
+    with pytest.raises(common.Step12ConfigError) as error:
+        common.refuse_missing(B1)
+
+    message = str(error.value)
+    assert "Step 12 has never been run against the official dataset" in message
+    assert "nothing can be lost" in message
+    assert "must NOT be read as this one's" in message
+    assert "produced by an earlier run" not in message
+
+
+def test_a_root_that_does_hold_results_still_warns_about_the_missing_one(
+        two_roots, finished):
+    finished("baseline2_ae_lstm")
+
+    with pytest.raises(common.Step12ConfigError) as error:
+        common.refuse_missing(B1)
+
+    message = str(error.value)
+    assert "this root holds 1 of 8 Step 12 results" in message
+    assert "produced by an earlier run in this output root" in message
+    assert "check what happened to this one before retraining it" in message
+    assert "never been run against" not in message
+
+
+def test_the_message_says_so_when_neither_root_has_it(two_roots):
+    with pytest.raises(common.Step12ConfigError) as error:
+        common.refuse_missing(B1)
+
+    assert "the own root does not have it either" in str(error.value)
+
+
+def test_both_messages_name_the_one_line_that_changes_it(two_roots, finished):
+    for setup in (lambda: None, lambda: finished("baseline2_ae_lstm")):
+        setup()
+        with pytest.raises(common.Step12ConfigError) as error:
+            common.refuse_missing(B1)
+        message = str(error.value)
+        assert "set LOCK_TRAINED_MODELS = False in config.py" in message
+        assert "re-run Steps 13-14 for this dataset" in message
+
+
+def test_approach_1_and_2_are_not_counted_as_step_12_results(two_roots,
+                                                             monkeypatch):
+    """Their metrics live in step11\\ and step11_attention\\, so they say
+    nothing about whether Step 12 ever ran against this dataset."""
+    monkeypatch.setattr(config, "STEP11B_OUTPUT_DIR",
+                        two_roots / "outputs_official" / "step11_attention",
+                        raising=False)
+    folder = two_roots / "outputs_official" / "step11_attention"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "metrics.json").write_text("{}", encoding="utf-8")
+
+    assert common.step12_results_here() == []
+    with pytest.raises(common.Step12ConfigError) as error:
+        common.refuse_missing(B1)
+    assert "never been run against the official dataset" in str(error.value)
+
+
+def test_the_other_root_helper_follows_the_active_mode(two_roots, monkeypatch):
+    assert common.other_dataset()[0] == "own"
+
+    monkeypatch.setattr(config, "RUNNING_OFFICIAL", False, raising=False)
+    assert common.other_dataset()[0] == "official"
+
+
+def test_the_sibling_path_swaps_only_the_root(two_roots):
+    path = common.metrics_path(B1)
+    sibling = common.metrics_path_in_other_root(B1)
+
+    assert str(path).startswith(str(two_roots / "outputs_official"))
+    assert str(sibling).startswith(str(two_roots / "outputs"))
+    assert sibling.parts[-3:] == path.parts[-3:]   # step12/<key>/metrics.json
