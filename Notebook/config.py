@@ -2116,9 +2116,17 @@ if RUNNING_OFFICIAL:
     METADATA_COLUMNS = list(OFFICIAL_IDENTIFIER_COLUMNS) + list(
         OFFICIAL_ROW_COLUMNS)
     METADATA_SHARED_COLUMNS = []       # Protocol is a feature here, not metadata
-    COMBINED_ID_COLUMNS = list(OFFICIAL_IDENTIFIER_COLUMNS)
+    # preprocessing.csv carries a readable `Protocol` text column DERIVED from
+    # the Protocol_* one-hot features, exactly as it does in own mode -- which
+    # is why Protocol is in COMBINED_ID_COLUMNS (the combined file's non-feature
+    # columns) but NOT in COMBINED_METADATA_ID_COLUMNS (it is not read from
+    # metadata.csv).  The training features stay the one-hot columns; the text
+    # column is for reading.  If the official file has no Protocol column at
+    # all, there are no one-hots to derive it from and Step 4 says so and
+    # leaves it out.
+    COMBINED_ID_COLUMNS = list(OFFICIAL_IDENTIFIER_COLUMNS) + ["Protocol"]
     COMBINED_METADATA_ID_COLUMNS = list(OFFICIAL_IDENTIFIER_COLUMNS)
-    ID_COLUMNS_NOT_FOR_TRAINING = list(OFFICIAL_IDENTIFIER_COLUMNS)
+    ID_COLUMNS_NOT_FOR_TRAINING = list(OFFICIAL_IDENTIFIER_COLUMNS) + ["Protocol"]
     COMBINED_INT_COLUMNS = [c for c in ("Src Port", "Dst Port")
                             if c in OFFICIAL_IDENTIFIER_COLUMNS]
 
