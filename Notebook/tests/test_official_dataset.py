@@ -535,13 +535,14 @@ def test_the_notebook_cells_for_3_1_to_3_7_are_mode_aware():
     if not notebook.exists():                  # pragma: no cover
         pytest.skip("the notebook is not in this checkout")
     nb = nbformat.read(str(notebook), as_version=4)
+    # The own-extraction merge cells now live in the appendix at the end of the
+    # notebook: the official flow reads MSCAD.csv in Step 1 and never merges.
     start = next(i for i, c in enumerate(nb.cells)
-                 if c.cell_type == "markdown" and "## Step 3" in c.source)
-    end = next(i for i, c in enumerate(nb.cells)
-               if c.cell_type == "markdown" and "## Step 4" in c.source)
+                 if c.cell_type == "markdown"
+                 and "## Own extraction (reference only)" in c.source)
 
     guarded = 0
-    for cell in nb.cells[start:end]:
+    for cell in nb.cells[start:]:
         if cell.cell_type != "code":
             continue
         own_calls = ("check_column_consistency(", "merge_flow_csvs(",
