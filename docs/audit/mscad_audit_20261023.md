@@ -540,7 +540,7 @@ and harder subset, and that is the conservative number to quote.
 
 ### G4 -- parameter counts
 
-**Measured on the Keras model, never estimated.** `experiments.py:442` is
+**Measured on the Keras model, never estimated.** `experiments.py:443` is
 `int(info.get("parameters", model.count_params()))`; `models_attention.py:1082`
 is `int(model.count_params())`; the Step 8 model card takes
 `architecture["parameters"].iloc[-1]`, the total row of the real layer table
