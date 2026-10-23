@@ -59,7 +59,7 @@ NEW_HEADINGS = [
     "## Step 5 - Autoencoder feature extraction",
     "## Step 6 - Transform the training and test sets",
     "## Step 7 - Class imbalance handled in the training loss",
-    "## Step 8 - The proposed hybrid CNN-LSTM",
+    "## Step 8 - Hybrid classifiers",
     "## Step 9 - Evaluation on the untouched test set",
     "## Step 10 - Model comparison",
     "## Step 11 - Adaptive Evidence Fusion",
@@ -74,7 +74,7 @@ STEP_FOLDERS = {1: "STEP3_OUTPUT_DIR", 2: "STEP4_OUTPUT_DIR",
                 9: "STEP11_OUTPUT_DIR", 10: "STEP12_OUTPUT_DIR",
                 11: "STEP13_OUTPUT_DIR", 12: "STEP14_OUTPUT_DIR"}
 
-OWN_BANNER = "## Own extraction (reference only)"
+OWN_BANNER = "## Appendix A - Own extraction (reference only)"
 
 
 # ===========================================================================
@@ -92,6 +92,13 @@ def official_flow_cells(nb):
     end = next(i for i, c in enumerate(nb.cells)
                if c.cell_type == "markdown" and OWN_BANNER in c.source)
     return nb.cells[:end]
+
+
+def github_anchor(heading):
+    """GitHub's auto-anchor for a heading's text, as the contents list uses."""
+    text = heading.strip().lower()
+    text = re.sub(r"[^\w\- ]", "", text)
+    return text.replace(" ", "-")
 
 
 def digest(text):
@@ -179,11 +186,16 @@ def test_the_twelve_step_headings_are_there_in_order():
     found = [line for line in lines if " addendum" not in line]
 
     assert found == NEW_HEADINGS, found
-    # the two addenda keep their own letters inside their renumbered steps
-    assert [line for line in lines if " addendum" in line] == [
-        "## Step 11 addendum - 11.8 Fusion across all approaches and baselines",
-        "## Step 12 addendum - 12.9 Explainability across all approaches and "
-        "baselines"]
+    # No level-2 addendum heading is left: each addendum is a subsection of the
+    # step it belongs to, so it reads in sequence rather than as a 13th step.
+    assert [line for line in lines if " addendum" in line] == []
+    body = "\n".join(c.source for c in official_flow_cells(nb)
+                     if c.cell_type == "markdown")
+    for heading in ("### 11.8 Fusion across all approaches and baselines "
+                    "(Step 11 addendum)",
+                    "### 12.9 Explainability across all approaches and "
+                    "baselines (Step 12 addendum)"):
+        assert heading in body, heading
 
 
 def test_the_contents_list_has_twelve_links_that_all_resolve():
@@ -191,15 +203,15 @@ def test_the_contents_list_has_twelve_links_that_all_resolve():
     contents = next(c for c in nb.cells
                     if c.cell_type == "markdown"
                     and c.source.lstrip().startswith("## Contents"))
-    links = re.findall(r"\]\(#((?:[^()]|\([^()]*\))+)\)", contents.source)
+    links = re.findall(r"\]\(#([^()\s]+)\)", contents.source)
     headings = set()
     for cell in nb.cells:
         if cell.cell_type != "markdown":
             continue
         for match in re.finditer(r"^#{2,4} (.+)$", cell.source, re.M):
-            headings.add(re.sub(r"\s+", "-", match.group(1).strip()))
+            headings.add(github_anchor(match.group(1)))
 
-    step_links = [link for link in links if link.startswith("Step-")]
+    step_links = [link for link in links if link.startswith("step-")]
     assert len(step_links) == 12, step_links
     for link in links:
         assert link in headings, link
@@ -250,7 +262,7 @@ def test_the_own_extraction_cells_are_kept_at_the_end():
         "nothing below feeds any result" in tail[0].source)
     # the own merge cells, with their historical numbering, are still visible
     headings = [line for c in tail if c.cell_type == "markdown"
-                for line in c.source.splitlines() if line.startswith("### 3.")]
+                for line in c.source.splitlines() if line.startswith("### A.")]
     assert len(headings) >= 7, headings
     guarded = [c for c in tail if c.cell_type == "code"
                and "OWN_STEP3_SKIP_NOTE" in c.source]

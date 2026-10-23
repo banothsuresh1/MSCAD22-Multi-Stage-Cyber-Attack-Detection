@@ -539,7 +539,7 @@ def test_the_notebook_cells_for_3_1_to_3_7_are_mode_aware():
     # notebook: the official flow reads MSCAD.csv in Step 1 and never merges.
     start = next(i for i, c in enumerate(nb.cells)
                  if c.cell_type == "markdown"
-                 and "## Own extraction (reference only)" in c.source)
+                 and "## Appendix A - Own extraction (reference only)" in c.source)
 
     guarded = 0
     for cell in nb.cells[start:]:
