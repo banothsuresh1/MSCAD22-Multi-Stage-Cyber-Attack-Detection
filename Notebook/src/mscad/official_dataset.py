@@ -160,7 +160,7 @@ def read_official_csv(path: Path | str | None = None, verbose: bool = True
     frame.columns = cleaned
     table = pd.DataFrame(rows)
     if verbose:
-        show_title("3.1  The official file, as read", level=4)
+        show_title("1.1  The official file, as read", level=4)
         show_table(kv_table([
             ("path", str(path)),
             ("size (MB)", "%.1f" % (path.stat().st_size / 1024 / 1024)),
@@ -219,7 +219,7 @@ def map_columns(frame: pd.DataFrame, verbose: bool = True) -> dict[str, Any]:
                       if key not in official_by_key]
 
     if verbose:
-        show_title("3.2  Column mapping", level=4)
+        show_title("1.2  Column mapping", level=4)
         show_table(kv_table([
             ("official columns", len(official)),
             ("our own feature names", len(ours)),
@@ -274,7 +274,7 @@ def find_identifiers(frame: pd.DataFrame, verbose: bool = True
                     if name in found else "unavailable")}
         for name in wanted])
     if verbose:
-        show_title("3.3  Identifiers", level=4)
+        show_title("1.3  Identifiers", level=4)
         show_table(table, all_columns=True,
                    note="Reading: every identifier the file has is moved to "
                         "metadata and kept out of the features -- a port "
@@ -317,7 +317,7 @@ def label_table(frame: pd.DataFrame, verbose: bool = True) -> dict[str, Any]:
     unexpected = [name for name in counts.index if name not in expected]
     absent = [name for name in expected if name not in set(counts.index)]
     if verbose:
-        show_title("3.4  Labels", level=4)
+        show_title("1.4  Labels", level=4)
         show_table(table, all_columns=True,
                    note="Reading: `rows` and `share (%%)` are counted from the "
                         "file; `published count` is what the authors reported, "
@@ -358,7 +358,7 @@ def column_quality(frame: pd.DataFrame, feature_columns: Sequence[str],
     with_nan = list(table.loc[table["NaN"] > 0, "column"])
     non_numeric = list(table.loc[table["non-numeric"], "column"])
     if verbose:
-        show_title("3.5  Column quality", level=4)
+        show_title("1.5  Column quality", level=4)
         show_table(kv_table([
             ("feature columns", len(feature_columns)),
             ("columns with inf", "%d: %s" % (len(with_inf),
@@ -395,7 +395,7 @@ def duplicate_report(frame: pd.DataFrame, feature_columns: Sequence[str],
         "rows", ascending=False).reset_index(drop=True)
     published = float(getattr(config, "OFFICIAL_EXPECTED_DUPLICATE_SHARE", 0.0))
     if verbose:
-        show_title("3.6  Duplicate feature vectors", level=4)
+        show_title("1.6  Duplicate feature vectors", level=4)
         show_table(kv_table([
             ("rows", f"{total:,}"),
             ("rows sharing a feature vector with another row",
@@ -454,7 +454,7 @@ def label_conflicts(frame: pd.DataFrame, feature_columns: Sequence[str],
                    .sort_values("rows", ascending=False)
                    .reset_index(drop=True))
     if verbose:
-        show_title("3.7  Label conflicts", level=4)
+        show_title("1.7  Label conflicts", level=4)
         show_table(kv_table([
             ("feature vectors carrying more than one label", f"{groups:,}"),
             ("rows involved", "%s (%.2f%% of the dataset)"
@@ -488,7 +488,7 @@ def build_merged(frame: pd.DataFrame, identifiers: dict[str, Any],
     out = frame.copy()
     if ROW_COLUMN in out.columns:
         raise OfficialDatasetError(
-            "the official file already has an %r column; Step 3 would "
+            "the official file already has an %r column; Step 1 would "
             "overwrite it" % ROW_COLUMN)
     out[ROW_COLUMN] = np.arange(len(out), dtype="int64")
 
@@ -531,7 +531,7 @@ def save_step3(out: dict[str, Any], verbose: bool = True) -> dict[str, Any]:
 
     names = config.OFFICIAL_STEP3_FILES
     place = prepare_output_dir(config.STEP3_OUTPUT_DIR,
-                               "the official Step 3 outputs", verbose=verbose)
+                               "the official Step 1 outputs", verbose=verbose)
     if place is None:
         return {"status": "skipped_not_windows", "folder": None}
     place = Path(place)
@@ -564,13 +564,18 @@ def load_merged_official(verbose: bool = True) -> pd.DataFrame:
     names = config.OFFICIAL_STEP3_FILES
     if place is None:
         raise OfficialDatasetError(
-            "the official Step 3 folder is not usable here -- %s"
+            "the official Step 1 folder is not usable here -- %s"
             % config.why_unusable(config.STEP3_OUTPUT_DIR))
     path = place / names["merged"]
     if not path.exists():
         raise OfficialDatasetError(
-            "%s does not exist. Run Step 3 in official mode "
-            "(official_dataset.run_step3) first." % path)
+            "Step 2 (preprocessing) needs the file Step 1 (data acquisition) "
+            "writes, and it is not there:\n"
+            "    %s\n"
+            "Run the Step 1 cells first (official_dataset.run_step3 -- the "
+            "function keeps its old name, see the numbering note at the top of "
+            "the notebook). Nothing was read and nothing was written."
+            % path)
     dtypes: dict[str, Any] = {}
     manifest_path = place / names["manifest"]
     if manifest_path.exists():
@@ -593,7 +598,7 @@ def build_summary(out: dict[str, Any]) -> str:
     conflicts = out["conflicts"]
     duplicates = out["duplicates"]
     identifiers = out["identifiers"]
-    lines = ["## Step 3 (official dataset) -- what is in the file", ""]
+    lines = ["## Step 1 (data acquisition) -- what is in the file", ""]
     lines.append("Read from `%s`: **%s rows x %d columns**, **%d feature "
                  "columns** after the identifiers were separated."
                  % (out["manifest"]["path"],
@@ -748,7 +753,7 @@ def run_step3(path: Path | str | None = None, overwrite: bool | None = None,
             % config.DATASET_SOURCE)
 
     if verbose:
-        show_title("Step 3 (official) -- the MSCAD dataset as published",
+        show_title("Step 1 - Data acquisition: the MSCAD dataset as published",
                    level=3)
         print(config.SKIP_STEPS_NOTE)
         print()
@@ -756,7 +761,7 @@ def run_step3(path: Path | str | None = None, overwrite: bool | None = None,
     if not overwrite and is_done():
         if verbose:
             show_note("`%s` already exists and `OVERWRITE_MERGED` is False, so "
-                      "Step 3 is reading it back rather than rebuilding it."
+                      "Step 1 is reading it back rather than rebuilding it."
                       % (folder() / config.OFFICIAL_STEP3_FILES["merged"]))
         merged = load_merged_official(verbose=verbose)
         return {"status": "loaded_existing", "merged": merged,
@@ -809,7 +814,7 @@ def run_step3(path: Path | str | None = None, overwrite: bool | None = None,
     out["ok"] = bool(not (out["report"]["result"] == FAIL).any())
 
     if verbose:
-        show_title("3.8  Step 3 verification", level=4)
+        show_title("1.8  Step 1 verification", level=4)
         show_table(out["report"], all_columns=True,
                    note="Reading: every check this step can make, in one "
                         "table. [OK] passed; [WARN] is a property of the "
@@ -817,7 +822,7 @@ def run_step3(path: Path | str | None = None, overwrite: bool | None = None,
                         "conflicts); [FAIL] means the file is not what the "
                         "published figures say and nothing downstream should "
                         "be trusted until it is explained.")
-        print("[%s]  Step 3 (official): %d checks, %d failed"
+        print("[%s]  Step 1 (data acquisition): %d checks, %d failed"
               % ("OK" if out["ok"] else "FAIL", len(out["report"]),
                  int((out["report"]["result"] == FAIL).sum())))
     return out
@@ -867,7 +872,7 @@ def part1_summary(verbose: bool = True) -> dict[str, Any]:
         lines.append(text)
 
     root = config.OUTPUTS_ROOT
-    add("## Part 1 summary -- the official MSCAD dataset, Steps 3 to 11")
+    add("## Summary -- the official MSCAD dataset, Steps 1 to 9")
     add("")
     add("Dataset source: **%s**; output root `%s`."
         % (config.DATASET_SOURCE, root))
@@ -878,10 +883,10 @@ def part1_summary(verbose: bool = True) -> dict[str, Any]:
     manifest = (_read_json(Path(place3) / config.OFFICIAL_STEP3_FILES["manifest"])
                 if place3 is not None else None)
     out["step3"] = manifest
-    add("### Step 3 -- the file as published")
+    add("### Step 1 -- the file as published")
     add("")
     if manifest is None:
-        add("- Not available: Step 3 has not been run in this output root.")
+        add("- Not available: Step 1 has not been run in this output root.")
     else:
         add("- **%s rows x %d columns**, %d feature columns after the "
             "identifiers were separated."
@@ -928,10 +933,10 @@ def part1_summary(verbose: bool = True) -> dict[str, Any]:
         if payload is not None:
             selected = payload.get("features") or payload.get("selected")
     out["step6_selected"] = selected
-    add("### Step 6 -- the selected features")
+    add("### Step 4 -- the selected features")
     add("")
     if not selected:
-        add("- Not available: Step 6 has not been run in this output root.")
+        add("- Not available: Step 4 has not been run in this output root.")
     else:
         add("**%d features** (MI + Pearson + permutation importance, training "
             "rows only):" % len(selected))
@@ -958,10 +963,10 @@ def part1_summary(verbose: bool = True) -> dict[str, Any]:
                          if column == "Label_encoded" else str(code))
                 counts[label] = int(number)
     out["step9_validation_rows"] = counts
-    add("### Step 9 -- rare classes in the validation part")
+    add("### Step 7 -- rare classes in the validation part")
     add("")
     if not counts:
-        add("- Not available: Step 9 has not been run in this output root.")
+        add("- Not available: Step 7 has not been run in this output root.")
     else:
         thin = {label: number for label, number in counts.items()
                 if number < minimum}
@@ -987,7 +992,7 @@ def part1_summary(verbose: bool = True) -> dict[str, Any]:
     add("")
 
     # ---- Step 11 --------------------------------------------------------
-    add("### Step 11 -- Approach 1 and Approach 2 on the untouched test set")
+    add("### Step 9 -- Approach 1 and Approach 2 on the untouched test set")
     add("")
     rows = []
     for name, folder_name, label in (
@@ -1044,7 +1049,7 @@ def part1_summary(verbose: bool = True) -> dict[str, Any]:
                 if value is not None:
                     add("  - recall %s: **%.4f**" % (rare, float(value)))
     else:
-        add("- Not available: Step 11 has not been run in this output root.")
+        add("- Not available: Step 9 has not been run in this output root.")
     add("")
     if quick:
         add("Against the quick stratified 80/20 check (seed 42) the switch was "
@@ -1062,3 +1067,166 @@ def part1_summary(verbose: bool = True) -> dict[str, Any]:
     if verbose:
         print(text)
     return out
+
+
+# ===========================================================================
+# STEP 1 SELF-CHECK -- the saved file against the file it came from
+# ===========================================================================
+def self_check(path: Path | str | None = None, verbose: bool = True
+               ) -> dict[str, Any]:
+    """Does the file Step 1 wrote still say what MSCAD.csv says?
+
+    A SELF-check, against one source and no other: the saved
+    `MSCAD_merged.csv` is re-read from disk and its label counts and per-column
+    medians are compared with the same quantities recomputed from
+    `MSCAD.csv`.  There is no second dataset to check against, and inventing
+    one would be worse than saying so -- what this proves is that Step 1
+    reordered and separated columns without changing a single value.
+
+    A median rather than a mean, because a median is unchanged by the
+    infinities the rate columns carry, and Step 1 does not cap them -- Step 2
+    does.
+    """
+    place = folder()
+    if place is None:
+        return {"table": pd.DataFrame(), "ok": False,
+                "detail": config.why_unusable(config.STEP3_OUTPUT_DIR)}
+    saved_path = place / config.OFFICIAL_STEP3_FILES["merged"]
+    if not saved_path.exists():
+        return {"table": pd.DataFrame(), "ok": False,
+                "detail": "%s does not exist yet" % saved_path}
+
+    source, _renames = read_official_csv(path, verbose=False)
+    saved = load_merged_official(verbose=False)
+
+    rows: list[dict[str, Any]] = []
+    rows.append({"check": "row count", "source (MSCAD.csv)": len(source),
+                 "saved (MSCAD_merged.csv)": len(saved),
+                 "largest difference": 0 if len(source) == len(saved) else
+                 abs(len(source) - len(saved)),
+                 "result": OK if len(source) == len(saved) else FAIL})
+
+    labels_source = source[config.LABEL_COLUMN].astype(str).value_counts()
+    labels_saved = saved[config.LABEL_COLUMN].astype(str).value_counts()
+    same_labels = (set(labels_source.index) == set(labels_saved.index)
+                   and all(int(labels_source[name]) == int(labels_saved[name])
+                           for name in labels_source.index))
+    rows.append({"check": "label counts, all %d classes" % len(labels_source),
+                 "source (MSCAD.csv)": "%d classes" % len(labels_source),
+                 "saved (MSCAD_merged.csv)": "%d classes" % len(labels_saved),
+                 "largest difference": 0 if same_labels else 1,
+                 "result": OK if same_labels else FAIL})
+
+    shared = [c for c in source.columns if c in saved.columns]
+    numeric = []
+    worst, worst_column = 0.0, None
+    for name in shared:
+        left = pd.to_numeric(source[name], errors="coerce")
+        right = pd.to_numeric(saved[name], errors="coerce")
+        if left.notna().sum() == 0 or right.notna().sum() == 0:
+            continue
+        numeric.append(name)
+        a = float(left.replace([np.inf, -np.inf], np.nan).median())
+        b = float(right.replace([np.inf, -np.inf], np.nan).median())
+        if np.isnan(a) and np.isnan(b):
+            continue
+        gap = abs(a - b) if not (np.isnan(a) or np.isnan(b)) else float("inf")
+        if gap > worst:
+            worst, worst_column = gap, name
+    rows.append({"check": "median of every numeric column (%d compared)"
+                           % len(numeric),
+                 "source (MSCAD.csv)": "%d columns" % len(numeric),
+                 "saved (MSCAD_merged.csv)": "%d columns" % len(numeric),
+                 "largest difference": worst,
+                 "result": OK if worst == 0.0 else FAIL})
+
+    table = pd.DataFrame(rows)
+    ok = bool(not (table["result"] == FAIL).any())
+    if verbose:
+        show_title("1.9  Self-check: the saved file against MSCAD.csv", level=4)
+        show_table(table, all_columns=True,
+                   note="Reading: the file Step 1 wrote, re-read from disk, "
+                        "against the same quantities recomputed from "
+                        "MSCAD.csv. There is no second dataset to compare "
+                        "with, so this proves only what it can prove -- that "
+                        "separating the identifiers and reordering the columns "
+                        "changed no value. %s"
+                        % ("Every column agrees exactly."
+                           if ok else "A [FAIL] here means the saved file is "
+                                      "not the file it came from."))
+        print("[%s]  Step 1 self-check: %d checks, largest median difference "
+              "%.3e" % ("OK" if ok else "FAIL", len(table), worst))
+    return {"table": table, "ok": ok, "worst_column": worst_column,
+            "worst_difference": worst, "numeric_columns": numeric}
+
+
+def own_extraction_label_comparison(verbose: bool = True) -> dict[str, Any]:
+    """The official label counts beside our own extraction's, as CONTEXT only.
+
+    Nothing here is used for training, and the two columns are not two
+    measurements of the same thing: they are two different datasets that happen
+    to carry the same class names.  It is shown because the switch between them
+    is a decision the write-up has to justify, and the clearest justification
+    is the two tables side by side -- our own extraction's labels disagreed
+    with themselves, and the official file's do not.
+    """
+    own_root = getattr(config, "OUTPUTS_ROOT_OWN", None)
+    own_path = (None if own_root is None else
+                Path(own_root) / "step3" / "MSCAD_merged.csv")
+    official = cmp_counts = None
+    place = folder()
+    if place is not None:
+        saved = place / config.OFFICIAL_STEP3_FILES["merged"]
+        if saved.exists():
+            official = pd.read_csv(saved, usecols=[config.LABEL_COLUMN],
+                                   low_memory=False)[
+                config.LABEL_COLUMN].astype(str).value_counts()
+    if official is None:
+        return {"table": pd.DataFrame(), "available": False,
+                "detail": "Step 1 has not written its file yet"}
+    if own_path is None or not own_path.exists():
+        if verbose:
+            show_note("**No own-extraction file to compare with.** "
+                      "`%s` is not on this machine, so the official counts "
+                      "below stand on their own." % own_path)
+        return {"table": official.rename("official rows").to_frame()
+                .reset_index(names="label"), "available": False,
+                "detail": "no own-extraction MSCAD_merged.csv"}
+
+    own = pd.read_csv(own_path, usecols=[config.LABEL_COLUMN],
+                      low_memory=False)[config.LABEL_COLUMN].astype(
+                          str).value_counts()
+    names = sorted(set(official.index) | set(own.index))
+    rows = []
+    for name in names:
+        rows.append({
+            "label": name,
+            "official rows": int(official.get(name, 0)),
+            "official %": round(100.0 * int(official.get(name, 0))
+                                / max(int(official.sum()), 1), 2),
+            "own extraction rows": int(own.get(name, 0)),
+            "own extraction %": round(100.0 * int(own.get(name, 0))
+                                      / max(int(own.sum()), 1), 2),
+            "in both": bool(name in official.index and name in own.index)})
+    table = pd.DataFrame(rows)
+    if verbose:
+        show_title("1.10  The two datasets' labels, side by side", level=4)
+        show_table(table, all_columns=True,
+                   note="Reading: **comparison, not used for training.** The "
+                        "left columns are the official dataset this pipeline "
+                        "runs on; the right are our own PCAP extraction, kept "
+                        "for reference. These are two different datasets that "
+                        "share class names, not two measurements of one thing. "
+                        "A class present in one and absent from the other is "
+                        "the clearest reason the official file became the "
+                        "primary dataset.")
+        only_own = [r["label"] for r in rows if not r["official rows"]]
+        only_official = [r["label"] for r in rows if not r["own extraction rows"]]
+        if only_own:
+            show_note("**Only in our own extraction:** %s." % ", ".join(only_own))
+        if only_official:
+            show_note("**Only in the official dataset:** %s."
+                      % ", ".join(only_official))
+    return {"table": table, "available": True,
+            "own_path": str(own_path), "official_total": int(official.sum()),
+            "own_total": int(own.sum())}

@@ -32,6 +32,7 @@ import ast
 import io
 import json
 import os
+import re
 from pathlib import Path, PureWindowsPath
 
 import pandas as pd
@@ -309,16 +310,28 @@ def test_the_run_functions_still_take_a_verbose_flag(module, function):
 # and the notebook itself
 # ===========================================================================
 def step12_cells():
-    """The Step 12 cells of the notebook, or a skip when nbformat is absent."""
+    """The model-comparison cells of the notebook, or a skip without nbformat.
+
+    Located by HEADING TEXT rather than by step number: the official-dataset
+    flow renumbered the notebook's markdown headings (model comparison is
+    "Step 10" there, the fusion that follows it "Step 11"), while every module,
+    function and output folder keeps the earlier numbering -- so this file,
+    which is about `comparison.py` and the Step 12 cells' behaviour, still
+    tests exactly what it always did.
+    """
     nbformat = pytest.importorskip("nbformat")
     if not NOTEBOOK.exists():                  # pragma: no cover
         pytest.skip("the notebook is not in this checkout")
     nb = nbformat.read(str(NOTEBOOK), as_version=4)
     cells = nb.cells
     starts = [i for i, c in enumerate(cells)
-              if c.cell_type == "markdown" and "## Step 12" in c.source]
+              if c.cell_type == "markdown"
+              and re.search(r"^## Step \d+ - Model comparison$", c.source,
+                            re.M)]
     ends = [i for i, c in enumerate(cells)
-            if c.cell_type == "markdown" and "## Step 13" in c.source]
+            if c.cell_type == "markdown"
+            and re.search(r"^## Step \d+ - Adaptive Evidence Fusion$",
+                          c.source, re.M)]
     assert starts and ends, "Step 12 could not be located in the notebook"
     return cells, range(starts[0], ends[0])
 
