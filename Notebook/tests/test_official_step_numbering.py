@@ -130,6 +130,9 @@ STEP_1_AND_2_MODULES = {
     "comparison.py",         # PR #46: Approach 1's row in the Step 10 table
     "step12_checks.py",      # PR #46: the same-file check behind that row
 }
+# Step 10's runner, which trains nothing either: PR #49 turns a missing result
+# into a pending ROW instead of an exception that took the whole cell down.
+STEP_1_AND_2_MODULES = STEP_1_AND_2_MODULES | {"common.py"}
 
 
 def test_the_frozen_modules_are_byte_identical_to_main():
