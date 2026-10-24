@@ -274,3 +274,57 @@ def test_the_blank_row_no_longer_sends_everyone_to_section_10_2():
         if key == config.APPROACH2_KEY:
             continue
         assert "10.2" not in cmp.which_step_produces(key), key
+
+
+# ===========================================================================
+# 5. the two Commit 3 statements the notebook and config now carry
+# ===========================================================================
+def test_official_mode_skips_no_step(monkeypatch):
+    """Data acquisition IS Step 1, so the settings table has nothing to list.
+
+    The suite runs in own mode, where SKIP_STEPS is empty too but the note is
+    empty as well, so config is reloaded in official mode to read both.
+    """
+    import importlib
+
+    monkeypatch.setenv("MSCAD_DATASET_SOURCE", "official")
+    official = importlib.reload(config)
+    try:
+        assert official.RUNNING_OFFICIAL is True
+        assert official.SKIP_STEPS == []
+        assert official.SKIP_STEPS_NOTE                # the note still explains
+        assert "skipped" not in official.SKIP_STEPS_NOTE.lower()
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_the_b6_note_states_the_two_different_pca_settings():
+    """The note must describe the settings the code uses, not a shared one."""
+    nbformat = pytest.importorskip("nbformat")
+    notebook = (Path(__file__).resolve().parent.parent / "notebooks"
+                / "MSCAD_Pipeline.ipynb")
+    if not notebook.exists():                          # pragma: no cover
+        pytest.skip("the notebook is not in this checkout")
+    nb = nbformat.read(str(notebook), as_version=4)
+    cell = next(c for c in nb.cells
+                if c.cell_type == "markdown" and "10.8 Baseline 6" in c.source)
+
+    assert "B6 keeps **3 of 15**" in cell.source
+    assert "B4 keeps **6 of 15**" in cell.source
+    # B4's setting is a variance target; B6's is a fixed count.  A note saying
+    # they share one threshold would be wrong, so it is pinned here.
+    assert "PCA_N_COMPONENTS =\n> 0.95" in cell.source or (
+        "PCA_N_COMPONENTS = 0.95" in cell.source)
+    assert "B6_PCA_COMPONENTS = 3" in cell.source
+    assert "a variance target" in cell.source
+    assert "a\n> fixed count" in cell.source or "a fixed count" in cell.source
+    assert "CNN vs no CNN" in cell.source
+
+
+def test_the_b6_note_matches_the_config_it_describes():
+    """If either setting changes, the note stops being true -- catch it here."""
+    assert config.PCA_N_COMPONENTS == 0.95
+    assert config.B6_PCA_COMPONENTS == 3
+    assert config.AE_LATENT_DIM == 15
+    assert config.CNN_KERNEL == 3

@@ -147,7 +147,8 @@ def test_official_mode_uses_normal_as_the_only_benign_class(tmp_path):
 
     assert seen["BENIGN_LABELS"] == ["Normal"]
     assert "Benign" not in seen["BENIGN_LABELS"]
-    assert seen["SKIP_STEPS"] == ["1", "2"]
+    # Nothing is skipped: data acquisition IS Step 1 in the official flow.
+    assert seen["SKIP_STEPS"] == []
 
 
 def test_official_mode_keeps_every_identifier_and_orig_row_out_of_features(

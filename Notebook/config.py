@@ -2142,7 +2142,11 @@ if RUNNING_OFFICIAL:
     # The official file is already one labelled flow table, so there is nothing
     # to convert from PCAP and nothing to acquire per capture.  The notebook
     # prints this rather than running them.
-    SKIP_STEPS = ["1", "2"]
+    # Nothing is skipped in official mode: data acquisition IS Step 1.  The old
+    # value named the PCAP conversion and the per-capture acquisition, which
+    # this flow does not have, so the Step 1 settings table printed "steps
+    # skipped: 1, 2" against the two steps that actually run.
+    SKIP_STEPS = []
     SKIP_STEPS_NOTE = (
         "The official dataset is already a single labelled flow table, so "
         "there is nothing to convert and nothing to merge: Step 1 reads %s "
