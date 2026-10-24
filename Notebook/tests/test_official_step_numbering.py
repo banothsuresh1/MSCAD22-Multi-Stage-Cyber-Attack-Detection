@@ -122,9 +122,14 @@ def git(*args):
 # ===========================================================================
 # The Step 1 and Step 2 modules may differ from main: they are the ones the
 # official-dataset work touches.  Everything in FROZEN_MODULES may not.
-STEP_1_AND_2_MODULES = {"official_dataset.py", "preprocessing.py",
-                        # Step 10's reporting, which trains nothing
-                        "comparison.py", "step12_checks.py"}
+# Each entry names the PR that justifies it, so a future reviewer can tell
+# this set was widened on purpose and not by a test-silencing edit.
+STEP_1_AND_2_MODULES = {
+    "official_dataset.py",   # Step 1 itself -- the official-dataset loader
+    "preprocessing.py",      # PR #45: COMBINED_ID_COLUMNS = [] verification
+    "comparison.py",         # PR #46: Approach 1's row in the Step 10 table
+    "step12_checks.py",      # PR #46: the same-file check behind that row
+}
 
 
 def test_the_frozen_modules_are_byte_identical_to_main():

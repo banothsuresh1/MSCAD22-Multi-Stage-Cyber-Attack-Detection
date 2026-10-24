@@ -28,6 +28,29 @@ Windows paths are built with PureWindowsPath.
     python -m pytest tests -v -W ignore::DeprecationWarning
 """
 
+# ---------------------------------------------------------------------------
+# NOTEBOOK OUTPUT POLICY (shared with tests/test_notebook_structure.py)
+# ---------------------------------------------------------------------------
+# One policy, stated once, enforced in two places: THE NOTEBOOKS IN THIS REPO
+# CARRY NO STORED OUTPUTS AND NO EXECUTION COUNTS.  Results live under the
+# output root on disk (C:\MSCAD2022\outputs_official\), never inside the
+# .ipynb, so a diff of a notebook shows changed code and nothing else.
+#
+#   * the snapshot in tests/data/notebook_code_cells.json therefore records a
+#     CLEARED notebook: every execution_count is null and every outputs list
+#     is empty.  It is not a record of "what was last run";
+#   * test_notebook_structure pins cell ids, source, execution_count and
+#     outputs against that snapshot;
+#   * test_the_notebook_carries_no_stored_outputs, below, is the guardrail
+#     that keeps the cleared state true for the Step 12 cells.
+#
+# So a failure here reading `assert 1 == None` is NOT a stale snapshot: it
+# means a notebook was saved after being run.  Fix it at the cause -- in
+# Jupyter, Kernel > Restart Kernel and Clear Outputs of All Cells, save, and
+# re-run the suite.  Do not re-record the snapshot from a run notebook: that
+# would bake results into the repo and silently retire the policy.
+
+
 import ast
 import io
 import json
@@ -388,6 +411,9 @@ def test_the_notebook_carries_no_stored_outputs():
     for i, cell in enumerate(cells):
         if cell.cell_type != "code":
             continue
-        assert not (cell.get("outputs") or []), "cell %d has stored output" % i
+        assert not (cell.get("outputs") or []), (
+            "cell %d has stored output -- clear outputs and execution counts "
+            "and save again (see NOTEBOOK OUTPUT POLICY above)" % i)
         assert cell.get("execution_count") is None, (
-            "cell %d has an execution count" % i)
+            "cell %d has an execution count -- clear outputs and execution "
+            "counts and save again (see NOTEBOOK OUTPUT POLICY above)" % i)

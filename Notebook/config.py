@@ -1904,6 +1904,8 @@ MODEL_COLOURS[BASELINE6_NAME] = "#a06a2c"      # the eighth hue: brown,
 # is REFUSED, whatever its OVERWRITE_* flag says.  This exists because a model
 # silently retrained after its metrics were published makes every table that
 # quotes it wrong.  Set it to False deliberately when a retrain is intended.
+# Default = True.  Toggle only for a scoped retrain and always restore to True
+# in the same commit.
 LOCK_TRAINED_MODELS = True
 
 STEP12_PROVENANCE_FILES = {

@@ -19,6 +19,29 @@ read-only.
     python -m pytest tests -v -W ignore::DeprecationWarning
 """
 
+# ---------------------------------------------------------------------------
+# NOTEBOOK OUTPUT POLICY (shared with tests/test_step12_quiet.py)
+# ---------------------------------------------------------------------------
+# One policy, stated once, enforced in two places: THE NOTEBOOKS IN THIS REPO
+# CARRY NO STORED OUTPUTS AND NO EXECUTION COUNTS.  Results live under the
+# output root on disk (C:\MSCAD2022\outputs_official\), never inside the
+# .ipynb, so a diff of a notebook shows changed code and nothing else.
+#
+#   * the snapshot in tests/data/notebook_code_cells.json therefore records a
+#     CLEARED notebook: every execution_count is null and every outputs list
+#     is empty.  It is not a record of "what was last run";
+#   * this file pins cell ids, source, execution_count and outputs against
+#     that snapshot;
+#   * test_step12_quiet.test_the_notebook_carries_no_stored_outputs is the
+#     guardrail that keeps the cleared state true for the Step 12 cells.
+#
+# So a failure here reading `assert 1 == None` is NOT a stale snapshot: it
+# means a notebook was saved after being run.  Fix it at the cause -- in
+# Jupyter, Kernel > Restart Kernel and Clear Outputs of All Cells, save, and
+# re-run the suite.  Do not re-record the snapshot from a run notebook: that
+# would bake results into the repo and silently retire the policy.
+
+
 import hashlib
 import json
 import re
@@ -104,7 +127,12 @@ def test_every_code_cell_matches_the_snapshot(name, capsys):
                                                    len(recorded[name])))
     for cell, row in zip(code, recorded[name]):
         assert cell.get("id") == row["id"], (cell.get("id"), row["id"])
-        assert cell.get("execution_count") == row["execution_count"], row["id"]
+        assert cell.get("execution_count") == row["execution_count"], (
+            "%s: execution_count is %r, snapshot has %r -- the notebook was "
+            "saved after a run; clear outputs and execution counts and save "
+            "again (see NOTEBOOK OUTPUT POLICY above)"
+            % (row["id"], cell.get("execution_count"),
+               row["execution_count"]))
         source = hashlib.sha256(cell.source.encode("utf-8")).hexdigest()
         assert source == row["source_sha256"], "source changed: %s" % row["id"]
         outputs = hashlib.sha256(
@@ -112,7 +140,9 @@ def test_every_code_cell_matches_the_snapshot(name, capsys):
                        sort_keys=True,
                        ensure_ascii=False).encode("utf-8")).hexdigest()
         assert outputs == row["outputs_sha256"], (
-            "outputs changed: %s" % row["id"])
+            "outputs changed: %s -- the notebook carries stored output; "
+            "clear it and save again (see NOTEBOOK OUTPUT POLICY above)"
+            % row["id"])
 
     with capsys.disabled():
         print("\n[OK] code cells unchanged  (%s: %d cells)" % (name, len(code)))
