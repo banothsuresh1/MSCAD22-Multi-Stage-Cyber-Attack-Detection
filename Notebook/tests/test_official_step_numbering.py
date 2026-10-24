@@ -42,9 +42,12 @@ NOTEBOOK = REPO / "notebooks" / "MSCAD_Pipeline.ipynb"
 FIXTURE = Path(__file__).resolve().parent / "data" / "notebook_cell_identity.json"
 
 # The modules rule 2 freezes: the code after preprocessing, unchanged.
+# The training modules: Steps 3 to 9, 11 and 12.  comparison.py and
+# step12_checks.py are NOT here -- they build Step 10's report, they train
+# nothing, and the Approach 1 row fix had to change them.
 FROZEN_MODULES = (
     "splitting.py", "feature_selection.py", "autoencoder.py", "imbalance.py",
-    "models.py", "models_attention.py", "evaluation.py", "comparison.py",
+    "models.py", "models_attention.py", "evaluation.py",
     "experiments.py", "experiments_pca.py", "experiments_baseline5.py",
     "experiments_baseline6.py", "fusion.py", "fusion_all.py",
     "explainability.py", "explainability_all.py",
@@ -119,7 +122,9 @@ def git(*args):
 # ===========================================================================
 # The Step 1 and Step 2 modules may differ from main: they are the ones the
 # official-dataset work touches.  Everything in FROZEN_MODULES may not.
-STEP_1_AND_2_MODULES = {"official_dataset.py", "preprocessing.py"}
+STEP_1_AND_2_MODULES = {"official_dataset.py", "preprocessing.py",
+                        # Step 10's reporting, which trains nothing
+                        "comparison.py", "step12_checks.py"}
 
 
 def test_the_frozen_modules_are_byte_identical_to_main():

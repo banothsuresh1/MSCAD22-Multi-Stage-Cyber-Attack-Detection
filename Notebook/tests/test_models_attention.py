@@ -352,7 +352,9 @@ def test_approach_2_is_row_2_with_and_without_its_outputs(tmp_path):
     label = dict(config.STEP12_DISPLAY_ORDER)[config.APPROACH2_KEY]
     without = cmp.build_full_comparison(verbose=False)["table"]
     assert without.iloc[1]["config"] == label
-    assert without.iloc[1]["input features"] == config.NOT_TRAINED_TEXT
+    # the cell is the state plus the step that produces this row
+    assert str(without.iloc[1]["input features"]).startswith(
+        config.NOT_TRAINED_TEXT)
 
     write(config.APPROACH2_KEY, payload)
     with_it = cmp.build_full_comparison(verbose=False)["table"]

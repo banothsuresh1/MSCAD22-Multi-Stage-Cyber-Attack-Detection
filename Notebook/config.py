@@ -1564,7 +1564,11 @@ STEP12_ISOLATES = {
 }
 
 # The text shown in a row whose model has not been trained yet.
-NOT_TRAINED_TEXT = "not yet trained - run 10.2"
+# Just the state.  Which step produces the missing configuration is added by
+# comparison._blank_row from which_step_produces(key), because it differs per
+# row: the old fixed "- run 10.2" was right for Approach 2 and wrong for the
+# other seven.
+NOT_TRAINED_TEXT = "not yet trained"
 
 # Written beside the existing Step 12 files, never over them.  (You asked for
 # `per_class_f1_full.csv`; Step 12 already uses that name for its four-row
