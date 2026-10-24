@@ -2116,19 +2116,23 @@ if RUNNING_OFFICIAL:
     METADATA_COLUMNS = list(OFFICIAL_IDENTIFIER_COLUMNS) + list(
         OFFICIAL_ROW_COLUMNS)
     METADATA_SHARED_COLUMNS = []       # Protocol is a feature here, not metadata
-    # preprocessing.csv carries a readable `Protocol` text column DERIVED from
-    # the Protocol_* one-hot features, exactly as it does in own mode -- which
-    # is why Protocol is in COMBINED_ID_COLUMNS (the combined file's non-feature
-    # columns) but NOT in COMBINED_METADATA_ID_COLUMNS (it is not read from
-    # metadata.csv).  The training features stay the one-hot columns; the text
-    # column is for reading.  If the official file has no Protocol column at
-    # all, there are no one-hots to derive it from and Step 4 says so and
-    # leaves it out.
-    COMBINED_ID_COLUMNS = list(OFFICIAL_IDENTIFIER_COLUMNS) + ["Protocol"]
-    COMBINED_METADATA_ID_COLUMNS = list(OFFICIAL_IDENTIFIER_COLUMNS)
+    # preprocessing.csv has NO non-feature block in official mode.  The
+    # published MSCAD.csv carries none of Flow ID, Src IP, Dst IP, Src Port,
+    # Dst Port, Protocol or Timestamp, so there is nothing to put in front of
+    # the features: the file is the feature list followed by `Label`, and its
+    # column count is len(feature_list) + 1.  Listing columns here that the
+    # dataset does not have is what made Step 2's verification demand a
+    # seven-column identifier block and report [FAIL] against a file that was
+    # correct.  Own mode keeps its six identifiers plus Protocol, unchanged,
+    # in the `else` branch's values above.
+    COMBINED_ID_COLUMNS = []
+    COMBINED_METADATA_ID_COLUMNS = []
+    COMBINED_INT_COLUMNS = []
+    # ID_COLUMNS_NOT_FOR_TRAINING is a different thing: a never-train guard that
+    # Steps 4 and 5 apply to whatever columns a frame happens to carry.  It
+    # stays populated, so a column that should never reach a model is still
+    # caught if one ever appears.
     ID_COLUMNS_NOT_FOR_TRAINING = list(OFFICIAL_IDENTIFIER_COLUMNS) + ["Protocol"]
-    COMBINED_INT_COLUMNS = [c for c in ("Src Port", "Dst Port")
-                            if c in OFFICIAL_IDENTIFIER_COLUMNS]
 
     # --- Steps 1-2 do not apply --------------------------------------------
     # The official file is already one labelled flow table, so there is nothing
@@ -2136,10 +2140,10 @@ if RUNNING_OFFICIAL:
     # prints this rather than running them.
     SKIP_STEPS = ["1", "2"]
     SKIP_STEPS_NOTE = (
-        "Steps 1 and 2 are SKIPPED in official mode: they convert PCAPNG "
-        "captures to flow CSVs and acquire them one capture at a time, and the "
-        "official dataset is already a single labelled flow table. Step 3 reads "
-        "%s directly. Run with DATASET_SOURCE = \"own\" to use them."
+        "The official dataset is already a single labelled flow table, so "
+        "there is nothing to convert and nothing to merge: Step 1 reads %s "
+        "directly. The own extraction's conversion and merging cells are kept "
+        "in Appendix A and run only with DATASET_SOURCE = \"own\"."
         % OFFICIAL_CSV)
 else:
     SKIP_STEPS = []

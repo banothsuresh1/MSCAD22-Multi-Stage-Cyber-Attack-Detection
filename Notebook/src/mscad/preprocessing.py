@@ -977,8 +977,20 @@ def verify_combined(combined: pd.DataFrame, features: pd.DataFrame,
                     labels: pd.DataFrame, metadata: pd.DataFrame | None = None,
                     expected_rows: int | None = None,
                     id_columns: Sequence[str] | None = None,
+                    feature_order: Sequence[str] | None = None,
                     path: Path | None = None, verbose: bool = True):
-    """Re-read the combined file and check it against its parts.  [OK]/[FAIL]."""
+    """Re-read the combined file and check it against its parts.  [OK]/[FAIL].
+
+    `feature_order` is the order the builder wrote, which is `feature_list.json`
+    when Step 4 has one.  It is taken rather than assumed so that the column
+    check is about the feature list itself and not about the two orders
+    happening to agree.
+
+    A dataset with NO identifier columns is a normal case, not a failure: with
+    `COMBINED_ID_COLUMNS` empty the file is the features followed by `Label`,
+    the column count is `len(feature_list) + 1`, and the identifier checks are
+    reported as `[SKIP]` rather than failed.
+    """
     id_columns = (list(config.COMBINED_ID_COLUMNS) if id_columns is None
                   else list(id_columns))
     proto_name = config.COMBINED_PROTOCOL_COLUMN
@@ -990,6 +1002,10 @@ def verify_combined(combined: pd.DataFrame, features: pd.DataFrame,
     def add(name: str, ok: bool, detail: str) -> None:
         checks.append({"check": name, "result": "[OK]" if ok else "[FAIL]",
                        "detail": detail})
+
+    def skip(name: str, detail: str) -> None:
+        """A check this dataset cannot have, reported rather than failed."""
+        checks.append({"check": name, "result": "[SKIP]", "detail": detail})
 
     exists = path.exists()
     add("file exists", exists, str(path))
@@ -1012,18 +1028,30 @@ def verify_combined(combined: pd.DataFrame, features: pd.DataFrame,
     # columns, which the single readable Protocol replaces
     drop = (set(config.COMBINED_DROP_FEATURE_COLUMNS)
             if proto_name in id_columns else set())
-    source_features = [c for c in features.columns if c not in drop]
+    written_order = (list(feature_order) if feature_order is not None
+                     else list(features.columns))
+    source_features = [c for c in written_order if c not in drop]
     n_ids = len(id_columns)
     expected_order = id_columns + source_features + label_columns
     cols_expected = len(expected_order)
-    add("columns == %d identifiers + %d features + %d label"
-        % (n_ids, len(source_features), len(label_columns)),
-        on_disk.shape[1] == cols_expected,
+    if n_ids:
+        count_label = ("columns == %d identifiers + %d features + %d label"
+                       % (n_ids, len(source_features), len(label_columns)))
+        order_label = "columns are in the expected order"
+        order_detail = ("identifiers, then features, then %s"
+                        % ", ".join(label_columns))
+    else:
+        # No identifier columns: the official MSCAD dataset has none, so the
+        # file is the feature list followed by Label and nothing else.
+        count_label = ("columns == %d features + %d label"
+                       % (len(source_features), len(label_columns)))
+        order_label = "columns are in the expected feature-list order"
+        order_detail = ("the %d feature_list columns, then %s"
+                        % (len(source_features), ", ".join(label_columns)))
+    add(count_label, on_disk.shape[1] == cols_expected,
         "%d on disk vs %d expected" % (on_disk.shape[1], cols_expected))
-    add("columns are in the expected order",
-        list(on_disk.columns) == expected_order,
-        "identifiers, then features, then %s" % ", ".join(label_columns)
-        if list(on_disk.columns) == expected_order
+    add(order_label, list(on_disk.columns) == expected_order,
+        order_detail if list(on_disk.columns) == expected_order
         else "got %s ... %s" % (list(on_disk.columns[:7]), list(on_disk.columns[-3:])))
 
     present_one_hot = [c for c in config.COMBINED_DROP_FEATURE_COLUMNS
@@ -1062,6 +1090,9 @@ def verify_combined(combined: pd.DataFrame, features: pd.DataFrame,
         add("identifiers are NOT in feature_list.json",
             not set(id_columns) & set(source_features),
             "they are excluded from the model features")
+    else:
+        skip("identifier values match metadata row by row",
+             "the official dataset has no identifier columns")
 
     if proto_name in on_disk.columns and proto_name in id_columns:
         seen = sorted(set(on_disk[proto_name].dropna().astype(str)))
@@ -1110,7 +1141,9 @@ def verify_combined(combined: pd.DataFrame, features: pd.DataFrame,
         add("feature values match the source frame", False, "shapes differ")
 
     table = pd.DataFrame(checks)
-    all_ok = bool((table["result"] == "[OK]").all())
+    # A [SKIP] row is a check this dataset cannot have, not a check that failed:
+    # only a [FAIL] makes the file unusable.
+    all_ok = bool(not (table["result"] == "[FAIL]").any())
     if verbose:
         show_table(table, note="Read back from **%s**" % path)
         if not all_ok:
@@ -1145,7 +1178,8 @@ def save_combined(features: pd.DataFrame, labels: pd.DataFrame,
 
     table, ok, on_disk = verify_combined(
         combined, features, labels, metadata, expected_rows=len(features),
-        id_columns=id_columns, path=path, verbose=verbose)
+        id_columns=id_columns, feature_order=feature_order, path=path,
+        verbose=verbose)
 
     out.update({"status": "written", "ok": ok, "combined": combined,
                 "on_disk": on_disk, "verification": table,
