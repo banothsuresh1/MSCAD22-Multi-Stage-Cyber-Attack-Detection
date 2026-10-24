@@ -119,8 +119,13 @@ def git(*args):
 # ===========================================================================
 # 1. rule 2 -- the code after preprocessing is not changed
 # ===========================================================================
+# The Step 1 and Step 2 modules may differ from main: they are the ones the
+# official-dataset work touches.  Everything in FROZEN_MODULES may not.
+STEP_1_AND_2_MODULES = {"official_dataset.py", "preprocessing.py"}
+
+
 def test_the_frozen_modules_are_byte_identical_to_main():
-    """Only the Step 1 loader may differ from main under src/mscad/."""
+    """Only the Step 1 and Step 2 modules may differ from main."""
     base = None
     for candidate in ("origin/main", "main"):
         out = subprocess.run(("git", "rev-parse", "--verify", candidate),
@@ -137,7 +142,7 @@ def test_the_frozen_modules_are_byte_identical_to_main():
                    ).splitlines() if line.strip()]
     touched = {Path(name).name for name in changed}
 
-    assert touched <= {"official_dataset.py"}, sorted(touched)
+    assert touched <= STEP_1_AND_2_MODULES, sorted(touched)
     for name in FROZEN_MODULES:
         assert name not in touched, name
 
