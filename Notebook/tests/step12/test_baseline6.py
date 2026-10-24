@@ -234,9 +234,13 @@ def test_a_finished_baseline_6_is_loaded_not_retrained(finished, monkeypatch):
 def test_a_missing_baseline_6_with_the_lock_on_stops(step12_dirs, monkeypatch):
     monkeypatch.setattr(b6mod, "run_baseline6", explode)
 
-    with pytest.raises(common.Step12ConfigError) as error:
-        module.run(verbose=False)
+    # PR #49: pending row, not an exception; nothing trained either way.
+    result = module.run(verbose=False)
 
+    assert result["status"] == common.PENDING
+    assert result["ok"] is False
+    with pytest.raises(common.Step12ConfigError) as error:
+        common.refuse_missing(module.KEY)
     assert "set LOCK_TRAINED_MODELS = False in config.py" in str(error.value)
 
 

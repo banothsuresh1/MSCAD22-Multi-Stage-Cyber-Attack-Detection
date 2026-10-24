@@ -58,6 +58,11 @@ from .. import step12_checks as s12  # noqa: E402
 
 OK, FAIL, WARN, SKIP = "[OK]", "[FAIL]", "[WARN]", "[SKIP]"
 LOADED, TRAINED = "loaded", "trained"
+# A third state, beside loaded and trained: the configuration has no result in
+# the ACTIVE output root and the lock is on, so nothing was trained and nothing
+# could be loaded.  It used to be an exception, which took the whole Step 10
+# cell down with it; it is a row now.  See `pending_result`.
+PENDING = "pending"
 TARGET_COLUMN = "Label_encoded"
 
 # short folder name per internal key -- the name the manifest folder and the
@@ -211,6 +216,109 @@ def step12_results_here() -> list[str]:
         if parts[:len(root)] == root:
             found.append(other)
     return found
+
+
+# ===========================================================================
+# PENDING: a missing result is a display state, not a crash
+# ===========================================================================
+# B1-B6 have never been trained on the official dataset -- only approach1\ and
+# approach2\ exist under outputs_official\step12\.  Raising for each of them
+# meant one missing result took down the whole Step 10 cell, so the two results
+# that DO exist could not be seen either.
+#
+# What this does NOT change: the lock still refuses to train anything, and
+# nothing is ever read from the other dataset's output root.  A pending row
+# says "not trained on official" in every metric column and carries no
+# numbers; `ok` is False, because nothing was verified.
+#
+# What still RAISES, because it is a misconfiguration rather than a missing
+# result: a DATASET_SOURCE that is not one of the two datasets, an output root
+# that is not on this machine at all (the Windows-path guard), and an output
+# root that does not exist on disk.  Rendering "not trained on official" for
+# those would hide a typo behind eight pending rows.
+
+
+def refuse_if_the_root_is_not_a_root(key: str) -> None:
+    """Stop when the active output root is misconfigured, not merely empty."""
+    source = str(getattr(config, "DATASET_SOURCE", "own"))
+    known = {"own", "official"}
+    if source not in known:
+        raise Step12ConfigError(
+            "DATASET_SOURCE is %r, which is not one of %s, so there is no "
+            "output root to read %s from. Set it in config.py (or the "
+            "MSCAD_DATASET_SOURCE environment variable) and run this again."
+            % (source, sorted(known), display_label(key)))
+    # Only a root this machine can read can be checked for existence.  One it
+    # cannot read is the Windows-path guard, and `run_one` has already raised
+    # for that through `metrics_path(key) is None`; raising again here would
+    # also fire for a caller that redirected the step folders but not the root.
+    root = config.usable_output_dir(getattr(config, "OUTPUTS_ROOT", ""))
+    if root is not None and not Path(root).exists():
+        raise Step12ConfigError(
+            "the %s output root does not exist, so nothing has been run "
+            "against this dataset at all:\n    missing root: %s\n"
+            "This is a configuration problem, not a pending result: check "
+            "DATASET_SOURCE and MSCAD_DATA_ROOT before reading any table."
+            % (source, root))
+
+
+def pending_result(key: str, components: dict[str, Any] | None = None,
+                   extra_files: Callable[[], Sequence[tuple[str, Path]]] | None
+                   = None, verbose: bool = True) -> dict[str, Any]:
+    """The row for a configuration with no result in the active root.
+
+    Shaped exactly like `run_one`'s result so every caller keeps working:
+    `metrics` is an empty dict rather than None, so `.get("full")` still
+    answers, and the protocol and snapshot tables carry one [SKIP] row each
+    rather than being empty.
+    """
+    label = display_label(key)
+    text = cmp.not_trained_here_text()
+    source = str(getattr(config, "DATASET_SOURCE", "own"))
+    detail = "%s (nothing trained, nothing loaded)" % text
+
+    skip = pd.DataFrame([{
+        "check": "a saved result exists in the %s output root" % source,
+        "expected": str(metrics_path(key)), "actual": "(no file)",
+        "result": SKIP, "detail": text}])
+    unchanged = pd.DataFrame([{
+        "configuration": label, "metrics compared": 0,
+        "largest difference": np.nan, "result": SKIP, "detail": text}])
+    files = list(extra_files() if extra_files is not None else ())
+
+    result: dict[str, Any] = {
+        "key": key, "label": label, "short_name": short_name(key),
+        "components": dict(components or {}),
+        "status": PENDING, "status_detail": detail,
+        "pending": True, "locked": locked(key),
+        "metrics": {}, "metrics_path": str(metrics_path(key)),
+        "provenance": provenance(key, extra=files),
+        "protocol": skip, "unchanged": unchanged,
+        "headline": pending_headline(), "loaded": {},
+        "manifest": None, "ok": False,
+    }
+    if verbose:
+        print("  [PENDING] %s: %s" % (label, detail))
+        dl.show_note(
+            "%s has no saved result under `%s`, and LOCK_TRAINED_MODELS is "
+            "True, so nothing was trained. Its row reads `%s`. A result in "
+            "the other dataset's output root belongs to that dataset -- "
+            "different class count and different label distribution -- and is "
+            "NOT read here. To train it on purpose: set LOCK_TRAINED_MODELS = "
+            "False in config.py, run this file again, and re-run Steps 11-12 "
+            "for this dataset so every table agrees again."
+            % (label, config.OUTPUTS_ROOT, text))
+        dl.show_table(result["headline"],
+                      note="%s -- %s" % (label, detail))
+    return result
+
+
+def pending_headline() -> pd.DataFrame:
+    """`headline()`'s metrics, every value reading "not trained on <source>"."""
+    text = cmp.not_trained_here_text()
+    empty = headline({})
+    return pd.DataFrame([{"metric": row["metric"], "value": text}
+                         for _i, row in empty.iterrows()])
 
 
 def refuse_missing(key: str) -> None:
@@ -694,7 +802,11 @@ def run_one(key: str, loader: Callable[..., dict[str, Any]],
         out = loader(verbose=verbose) or {}
     else:
         if lock_is_on():
-            refuse_missing(key)
+            # a misconfigured root still stops here; a merely missing result
+            # becomes a pending row, so the table renders
+            refuse_if_the_root_is_not_a_root(key)
+            return pending_result(key, components=components,
+                                  extra_files=extra_files, verbose=verbose)
         if trainer is None:
             raise Step12ConfigError(
                 "%s has no saved result and no trainer: it is a LOAD-ONLY "
@@ -738,6 +850,13 @@ def run_one(key: str, loader: Callable[..., dict[str, Any]],
     return result
 
 
+def verdict(result: dict[str, Any]) -> str:
+    """OK, FAIL or PENDING -- a pending row is neither a pass nor a failure."""
+    if result.get("pending"):
+        return "PENDING"
+    return "OK" if result["ok"] else "FAIL"
+
+
 def report(result: dict[str, Any]) -> None:
     """The four blocks a single configuration prints, loaded or trained."""
     dl.show_table(result["provenance"][["file", "exists", "size (bytes)",
@@ -754,8 +873,7 @@ def report(result: dict[str, Any]) -> None:
                   note="The saved numbers recorded before this file ran, "
                        "against the file as it stands now (1e-9).")
     print("[%s]  %s: %s"
-          % ("OK" if result["ok"] else "FAIL", result["label"],
-             result["status_detail"]))
+          % (verdict(result), result["label"], result["status_detail"]))
 
 
 # ===========================================================================
@@ -786,6 +904,5 @@ def cli(module: Any, argv: Sequence[str] | None = None) -> int:
         return 2
     if arguments.quiet:
         print("[%s]  %s: %s"
-              % ("OK" if result["ok"] else "FAIL", result["label"],
-                 result["status_detail"]))
-    return 0 if result["ok"] else 1
+              % (verdict(result), result["label"], result["status_detail"]))
+    return 0 if result["ok"] or result.get("pending") else 1

@@ -128,9 +128,20 @@ def test_a_missing_result_with_the_lock_on_stops_without_training(step12_dirs,
                                                                    monkeypatch):
     monkeypatch.setattr(ma, "run_step11b", explode)
 
-    with pytest.raises(common.Step12ConfigError) as error:
-        module.run(verbose=False)
+    # PR #49: a missing result with the lock on is a PENDING ROW, not an
+    # exception -- one missing baseline used to take the whole Step 10 cell
+    # down with it.  Nothing is trained either way: `explode` above is the
+    # trainer, and reaching it would fail this test.
+    result = module.run(verbose=False)
 
+    assert result["status"] == common.PENDING
+    assert result["pending"] is True
+    assert result["ok"] is False
+    assert set(result["headline"]["value"]) == {
+        common.cmp.not_trained_here_text()}
+    # the lock's own message is unchanged, for the callers that want it
+    with pytest.raises(common.Step12ConfigError) as error:
+        common.refuse_missing(module.KEY)
     message = str(error.value)
     assert "LOCK_TRAINED_MODELS is True" in message
     assert "set LOCK_TRAINED_MODELS = False in config.py" in message
