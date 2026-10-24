@@ -90,6 +90,19 @@ def predictions_payload(rows=6, benign_probability=0.7):
     })
 
 
+def write_step12_proposed(tmp_path, payload):
+    """Approach 1's Step 12 row, at its own path.
+
+    Written explicitly rather than through `comparison.result_path`, because
+    that falls back to Step 11's metrics.json when the Step 12 runner has not
+    written a copy -- and this is the case where there IS a separate copy.
+    """
+    folder = tmp_path / "step12" / "proposed"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "metrics.json").write_text(json.dumps(payload), encoding="utf-8")
+    return folder / "metrics.json"
+
+
 def write_config(tmp_path, key, metrics=None, predictions=None, model=True):
     """One configuration's folder, as Step 11/12 would have written it.
 
@@ -269,7 +282,7 @@ def test_approach1_sources_are_reported_side_by_side_and_agreement_is_ok(
         tmp_path):
     label = dict(config.STEP12_DISPLAY_ORDER)[PROPOSED]
     payload = metrics_payload(label, f1=0.7)
-    write_config(tmp_path, PROPOSED, metrics=payload)
+    write_step12_proposed(tmp_path, payload)
     (tmp_path / "step11").mkdir(parents=True, exist_ok=True)
     (tmp_path / "step11" / "metrics.json").write_text(json.dumps(payload),
                                                       encoding="utf-8")
@@ -284,7 +297,7 @@ def test_approach1_sources_are_reported_side_by_side_and_agreement_is_ok(
 
 def test_a_backup_that_disagrees_is_a_failure_that_names_the_metrics(tmp_path):
     label = dict(config.STEP12_DISPLAY_ORDER)[PROPOSED]
-    write_config(tmp_path, PROPOSED, metrics=metrics_payload(label, f1=0.70))
+    write_step12_proposed(tmp_path, metrics_payload(label, f1=0.70))
     (tmp_path / "step11").mkdir(parents=True, exist_ok=True)
     (tmp_path / "step11" / "metrics.json").write_text(
         json.dumps(metrics_payload(label, f1=0.70)), encoding="utf-8")

@@ -97,6 +97,21 @@ def result_path(key: str) -> Path | None:
             return None
         folder = config.usable_output_dir(folder)
         return None if folder is None else folder / "metrics.json"
+    # Approach 1 is the third of the same kind, and the one that was missing.
+    # Its evaluation is written by Step 11 (evaluation.run_step11) to
+    # step11\metrics.json, never by the Step 12 runner to
+    # step12\proposed\metrics.json -- so looking only in the Step 12 folder
+    # left the proposed pipeline out of its own comparison.  The Step 12 copy,
+    # when a run of experiments.run_step12 has written one, is preferred: it
+    # carries the descriptor fields as well as the metrics.
+    if key == "proposed":
+        step12 = config.usable_output_dir(config.STEP12_OUTPUT_DIR)
+        if step12 is not None and (step12 / key / "metrics.json").exists():
+            return step12 / key / "metrics.json"
+        folder = config.usable_output_dir(config.STEP11_OUTPUT_DIR)
+        if folder is None:
+            return None
+        return folder / config.STEP11_FILES["metrics"]
     folder = config.usable_output_dir(config.STEP12_OUTPUT_DIR)
     return None if folder is None else folder / key / "metrics.json"
 
@@ -267,12 +282,76 @@ def _row_from_metrics(label: str, metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _blank_row(label: str) -> dict[str, Any]:
-    """A placeholder row for a configuration that has not been trained."""
+def _blank_row(label: str, key: str | None = None) -> dict[str, Any]:
+    """A placeholder row for a configuration that has not been trained.
+
+    The cell names the step that produces THIS configuration.  The old fixed
+    text said "run 10.2" for whichever row was missing, and 10.2 trains
+    Approach 2 -- wrong for seven of the eight rows.
+    """
     row = {column: None for column in COLUMNS}
     row["config"] = label
-    row["input features"] = config.NOT_TRAINED_TEXT
+    row["input features"] = (config.NOT_TRAINED_TEXT if key is None
+                             else "%s - %s" % (config.NOT_TRAINED_TEXT,
+                                               which_step_produces(key)))
     return row
+
+
+def _proposed_descriptors() -> dict[str, Any]:
+    """Approach 1's descriptor fields, from files Steps 4, 8 and 10 already saved.
+
+    Step 11's metrics.json records the scores but not the input width, the
+    latent width, the parameter count, the seed or the best epoch: Step 11b
+    records those for Approach 2, Step 11 never did for Approach 1.  They are
+    READ here from `model_card.json` and `selected_features.json` -- nothing is
+    recomputed, no model is loaded and no saved file is rewritten -- so the
+    descriptor columns can be filled without re-running Step 11.
+    """
+    out: dict[str, Any] = {}
+    step6 = config.usable_output_dir(config.STEP6_OUTPUT_DIR)
+    if step6 is not None:
+        picked = Path(step6) / config.STEP6_FILES["selected"]
+        if picked.exists():
+            try:
+                saved = json.loads(picked.read_text(encoding="utf-8"))
+            except (ValueError, OSError):           # pragma: no cover
+                saved = {}
+            count = saved.get("n_selected") or len(saved.get("features") or [])
+            if count:
+                out["n_input_features"] = int(count)
+    step10 = config.usable_output_dir(config.STEP10_OUTPUT_DIR)
+    if step10 is not None:
+        card_path = Path(step10) / config.STEP10_FILES.get("model_card",
+                                                           "model_card.json")
+        if card_path.exists():
+            try:
+                card = json.loads(card_path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):           # pragma: no cover
+                card = {}
+            shape = list(card.get("input_shape_per_sample") or [])
+            if shape:
+                out["model_input_shape"] = shape
+                out["latent_dim"] = int(shape[0])
+            architecture = card.get("architecture") or {}
+            if architecture.get("total_parameters") is not None:
+                out["parameters"] = int(architecture["total_parameters"])
+            training = card.get("training") or {}
+            for source, target in (("seed", "seed"),
+                                   ("best_epoch", "best_epoch"),
+                                   ("best_val_macro_f1", "best_val_macro_f1"),
+                                   ("training_seconds", "training_seconds")):
+                if training.get(source) is not None:
+                    out[target] = training[source]
+    return out
+
+
+def _with_descriptors(key: str, metrics: dict[str, Any]) -> dict[str, Any]:
+    """Fill a row's descriptor fields when its own metrics.json lacks them."""
+    if key != "proposed" or metrics is None:
+        return metrics
+    extra = {name: value for name, value in _proposed_descriptors().items()
+             if metrics.get(name) in (None, "")}
+    return {**metrics, **extra} if extra else metrics
 
 
 def build_full_comparison(order: Sequence[tuple[str, str]] | None = None,
@@ -289,8 +368,9 @@ def build_full_comparison(order: Sequence[tuple[str, str]] | None = None,
         metrics = load_result(key)
         if metrics is None:
             missing.append(key)
-            rows.append(_blank_row(label))
+            rows.append(_blank_row(label, key))
             continue
+        metrics = _with_descriptors(key, metrics)
         loaded[key] = metrics
         rows.append(_row_from_metrics(label, metrics))
 
@@ -312,8 +392,15 @@ def build_full_comparison(order: Sequence[tuple[str, str]] | None = None,
 
 
 def trained_rows(table: pd.DataFrame) -> pd.Series:
-    """Boolean mask of the rows that actually have results."""
-    return table["input features"].astype(str) != config.NOT_TRAINED_TEXT
+    """Boolean mask of the rows that actually have results.
+
+    `startswith` rather than equality: a blank row's cell is the state followed
+    by the step that produces it, and that tail differs per configuration.  An
+    equality test here would count every untrained row as trained and let it
+    into the best-value marking.
+    """
+    return ~table["input features"].astype(str).str.startswith(
+        config.NOT_TRAINED_TEXT)
 
 
 def mark_best(table: pd.DataFrame) -> pd.DataFrame:

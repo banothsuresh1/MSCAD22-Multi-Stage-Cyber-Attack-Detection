@@ -131,7 +131,10 @@ def test_an_untrained_configuration_is_blank_and_named(tmp_path, capsys):
 
     assert built["missing"] == [config.APPROACH2_KEY]
     row = built["table"].iloc[1]
-    assert row["input features"] == config.NOT_TRAINED_TEXT
+    # the cell is the state plus the step that produces THIS row
+    assert str(row["input features"]).startswith(config.NOT_TRAINED_TEXT)
+    assert cmp.which_step_produces(config.APPROACH2_KEY) in str(
+        row["input features"])
     assert pd.isna(row["F1 (macro)"])
     assert "10.2" in cmp.which_step_produces(config.APPROACH2_KEY)
 
@@ -416,7 +419,9 @@ def test_the_new_files_never_share_a_name_with_an_existing_one():
 
 def test_the_display_order_block_holds_the_documented_defaults():
     assert len(config.STEP12_DISPLAY_ORDER) == 8
-    assert config.NOT_TRAINED_TEXT == "not yet trained - run 10.2"
+    # the section number moved out of the constant and into the row, because
+    # it differs per configuration (comparison._blank_row)
+    assert config.NOT_TRAINED_TEXT == "not yet trained"
     assert set(config.STEP12_ISOLATES) == {k for k, _l
                                            in config.STEP12_DISPLAY_ORDER}
     assert config.STEP12_EXACT_TOLERANCE == 1e-9

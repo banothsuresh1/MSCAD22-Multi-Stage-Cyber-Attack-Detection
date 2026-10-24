@@ -354,11 +354,21 @@ def check_approach1_consistency(checks: Checks, verbose: bool = True
     sources: dict[str, dict[str, Any]] = {}
 
     folder11 = config.usable_output_dir(config.STEP11_OUTPUT_DIR)
+    step11_path = None
     if folder11 is not None and (Path(folder11) / "metrics.json").exists():
+        step11_path = Path(folder11) / "metrics.json"
         sources["Step 11 (current)"] = json.loads(
-            (Path(folder11) / "metrics.json").read_text(encoding="utf-8"))
+            step11_path.read_text(encoding="utf-8"))
+    # The Step 12 row counts as a SECOND source only when it is a different
+    # file.  `comparison.result_path("proposed")` falls back to Step 11's
+    # metrics.json when the Step 12 runner has not written its own copy, and
+    # comparing that file with itself would report a vacuous [OK] for a
+    # consistency check that has nothing to compare.
     current = cmp.load_result("proposed")
-    if current is not None:
+    current_path = cmp.result_path("proposed")
+    same_file = (step11_path is not None and current_path is not None
+                 and Path(current_path) == step11_path)
+    if current is not None and not same_file:
         sources["Step 12 row (current)"] = current
     for backup in backup_folders():
         for candidate in (backup / "step11" / "metrics.json",
