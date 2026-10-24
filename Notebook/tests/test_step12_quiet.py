@@ -401,7 +401,11 @@ def test_step_12_shows_the_superseded_tables_no_more():
     # is the same.
     assert code.count("configuration_table_8()") == 1
     assert code.count("configuration_table()") == 0
-    assert code.count("run_step12_complete(") == 1
+    # PR #48: the one table path is the honest renderer, which calls
+    # run_step12_complete itself (quietly) for the checks, CSVs and figures.
+    # Still exactly one entry point, and still no second table.
+    assert code.count("show_honest_step10(") == 1
+    assert code.count("run_step12_complete(") == 0
     assert code.count("run_step12_full()") == 0
 
 
