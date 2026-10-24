@@ -88,10 +88,8 @@ def notebook():
 
 
 def official_flow_cells(nb):
-    """Every cell before the own-extraction appendix."""
-    end = next(i for i, c in enumerate(nb.cells)
-               if c.cell_type == "markdown" and OWN_BANNER in c.source)
-    return nb.cells[:end]
+    """Every cell: the notebook is the official flow and nothing else now."""
+    return list(nb.cells)
 
 
 def github_anchor(heading):
@@ -247,7 +245,9 @@ def test_the_note_maps_every_new_step_number_to_its_unchanged_folder():
 
 def test_the_official_flow_no_longer_mentions_the_pcap_conversion():
     nb = notebook()
-    forbidden = ("editcap", "tshark", "PCAPNG", "convert_pcapng_to_csvflows",
+    # A pointer to the companion notebook by name is fine; describing the
+    # conversion, or calling the own-extraction functions, is not.
+    forbidden = ("editcap", "tshark", "PCAPNG",
                  "acquire_captures(", "merge_flow_csvs(",
                  "check_column_consistency(", "save_step3_reports(")
 
@@ -256,22 +256,16 @@ def test_the_official_flow_no_longer_mentions_the_pcap_conversion():
             assert word not in cell.source, (i, cell.get("id"), word)
 
 
-def test_the_own_extraction_cells_are_kept_at_the_end():
+def test_the_own_extraction_cells_are_gone():
+    """Removed on purpose: the own extraction has its own notebook."""
     nb = notebook()
-    banner = next(i for i, c in enumerate(nb.cells)
-                  if c.cell_type == "markdown" and OWN_BANNER in c.source)
-    tail = nb.cells[banner:]
+    body = "\n".join(c.source for c in nb.cells)
 
-    assert "reference only" in tail[0].source
-    assert "not used for training" in tail[0].source or (
-        "nothing below feeds any result" in tail[0].source)
-    # the own merge cells, with their historical numbering, are still visible
-    headings = [line for c in tail if c.cell_type == "markdown"
+    assert OWN_BANNER not in body
+    assert not [line for c in nb.cells if c.cell_type == "markdown"
                 for line in c.source.splitlines() if line.startswith("### A.")]
-    assert len(headings) >= 7, headings
-    guarded = [c for c in tail if c.cell_type == "code"
-               and "OWN_STEP3_SKIP_NOTE" in c.source]
-    assert len(guarded) >= 5, len(guarded)
+    assert not [c for c in nb.cells if c.cell_type == "code"
+                and "OWN_STEP3_SKIP_NOTE" in c.source]
 
 
 # ===========================================================================

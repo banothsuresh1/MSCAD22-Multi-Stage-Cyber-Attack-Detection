@@ -527,32 +527,31 @@ def test_load_merged_still_works_in_official_mode(official_mode):
     assert od.ROW_COLUMN in frame.columns
 
 
-def test_the_notebook_cells_for_3_1_to_3_7_are_mode_aware():
-    """A Run All in official mode must not stop in the own-extraction cells."""
+def test_the_notebook_has_no_own_extraction_call_sites_left():
+    """The appendix was removed, so there is nothing left to guard.
+
+    The guard itself is not gone: `own_step3_applies()` and
+    `OWN_STEP3_SKIP_NOTE` are still in data_loading, and
+    test_every_own_step3_entry_point_skips_in_official_mode still proves each
+    entry point skips rather than raising.  What this test holds is the
+    notebook side: a Run All in official mode cannot reach an own-extraction
+    call, because the notebook no longer makes one.
+    """
     nbformat = pytest.importorskip("nbformat")
     notebook = (Path(__file__).resolve().parent.parent / "notebooks"
                 / "MSCAD_Pipeline.ipynb")
     if not notebook.exists():                  # pragma: no cover
         pytest.skip("the notebook is not in this checkout")
     nb = nbformat.read(str(notebook), as_version=4)
-    # The own-extraction merge cells now live in the appendix at the end of the
-    # notebook: the official flow reads MSCAD.csv in Step 1 and never merges.
-    start = next(i for i, c in enumerate(nb.cells)
-                 if c.cell_type == "markdown"
-                 and "## Appendix A - Own extraction (reference only)" in c.source)
 
-    guarded = 0
-    for cell in nb.cells[start:]:
+    own_calls = ("acquire_captures(", "check_column_consistency(",
+                 "merge_flow_csvs(", "save_merged(", "save_step3_reports(",
+                 "summarize_dataset(")
+    for cell in nb.cells:
         if cell.cell_type != "code":
             continue
-        own_calls = ("check_column_consistency(", "merge_flow_csvs(",
-                     "save_merged(", "save_step3_reports(",
-                     "summarize_dataset(")
-        if any(call in cell.source for call in own_calls):
-            assert "config.RUNNING_OFFICIAL" in cell.source, cell["id"]
-            assert "OWN_STEP3_SKIP_NOTE" in cell.source, cell["id"]
-            guarded += 1
-    assert guarded == 5, guarded
+        for call in own_calls:
+            assert call not in cell.source, (cell["id"], call)
 
 
 # ===========================================================================

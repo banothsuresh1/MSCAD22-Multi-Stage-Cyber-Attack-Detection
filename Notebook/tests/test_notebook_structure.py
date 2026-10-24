@@ -46,10 +46,11 @@ STEP_HEADINGS = [
     "Step 11 - Adaptive Evidence Fusion",
     "Step 12 - Explainability Layer",
 ]
+# The own extraction has its own notebook; this one is the official flow only.
 APPENDIX = "Appendix A - Own extraction (reference only)"
 # The sections that are not steps but legitimately hold code or prose.
 NON_STEP_SECTIONS = {"Objective", "Pipeline overview", "Contents", "Setup",
-                     "Summary", APPENDIX}
+                     "Summary"}
 
 
 def read(path):
@@ -120,13 +121,11 @@ def test_every_code_cell_matches_the_snapshot(name, capsys):
 # ===========================================================================
 # 2. the order a reader sees
 # ===========================================================================
-def test_the_step_headings_read_one_to_twelve_then_the_appendix():
+def test_the_step_headings_read_one_to_twelve():
     nb = read(MAIN)
-    headings = level_two(nb)
-    wanted = [h for h in headings
-              if h.startswith("Step ") or h == APPENDIX]
+    wanted = [h for h in level_two(nb) if h.startswith("Step ")]
 
-    assert wanted == STEP_HEADINGS + [APPENDIX], wanted
+    assert wanted == STEP_HEADINGS, wanted
 
 
 def test_no_step_number_appears_twice():
@@ -139,15 +138,19 @@ def test_no_step_number_appears_twice():
     assert numbers == [str(n) for n in range(1, 13)], numbers
 
 
-def test_the_appendix_is_the_last_section_and_carries_its_note():
+def test_the_own_extraction_appendix_is_gone():
+    """It moved to convert_pcapng_to_csvflows.ipynb; nothing is left behind."""
     nb = read(MAIN)
     headings = level_two(nb)
 
-    assert headings[-1] == APPENDIX, headings[-3:]
-    cell = next(c for c in nb.cells
-                if c.cell_type == "markdown" and ("## " + APPENDIX) in c.source)
-    assert "results in Steps 1-12" in cell.source
-    assert "official MSCAD.csv" in cell.source
+    assert APPENDIX not in headings, headings[-3:]
+    assert headings[-1] == "Summary", headings[-3:]
+    assert headings[-2] == STEP_HEADINGS[-1], headings[-3:]
+    body = "\n".join(c.source for c in nb.cells)
+    for marker in ("## Appendix A", "### A.1 ", "### A.11 ",
+                   "OWN_STEP3_SKIP_NOTE", "acquire_captures(",
+                   "merge_flow_csvs(", "save_step3_reports("):
+        assert marker not in body, marker
 
 
 def test_the_contents_list_covers_every_section_in_order():
@@ -157,7 +160,7 @@ def test_the_contents_list_covers_every_section_in_order():
     links = re.findall(r"^\d+\. \[([^]]+)\]\(#([^()\s]+)\)$", contents.source,
                        re.M)
 
-    assert [label for label, _anchor in links] == STEP_HEADINGS + [APPENDIX]
+    assert [label for label, _anchor in links] == STEP_HEADINGS
     for label, anchor in links:
         assert anchor == github_anchor(label), (label, anchor)
     anchors = {github_anchor(h) for h in level_two(nb)}

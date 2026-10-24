@@ -1,5 +1,5 @@
 {
- "note": "sha256 of every code cell's source and outputs, in document order, recorded when the notebooks were put in step order. No code cell may change without this file changing with it.",
+ "note": "sha256 of every code cell's source and outputs, in document order, recorded when the notebooks were put in step order. No code cell may change without this file changing with it.  The own-extraction appendix was removed from MSCAD_Pipeline.ipynb, so its nine code cells are no longer listed; every remaining entry is unchanged.",
  "notebooks": {
   "MSCAD_Pipeline.ipynb": [
    {
@@ -810,60 +810,6 @@
     "id": "step149-23",
     "execution_count": null,
     "source_sha256": "edcecc25547cfa808a142a2cb558ae8e83d3b415d7dd2de9d120ef4ffd57ac72",
-    "outputs_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-   },
-   {
-    "id": "67a8e49b",
-    "execution_count": null,
-    "source_sha256": "0247fc23c3879c0fab0f826088a30289455b276ed3eee73e22471d73b23c7667",
-    "outputs_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-   },
-   {
-    "id": "02f621f3",
-    "execution_count": null,
-    "source_sha256": "1d51d73179ae413e38411f590ec4299c5cd4babc9b5b22ebee7fb86e6205240c",
-    "outputs_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-   },
-   {
-    "id": "4019ce5b",
-    "execution_count": null,
-    "source_sha256": "6ae3cf2753f82026cc311e8610427dbcad8550b36ae66652734d12c59f011e98",
-    "outputs_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-   },
-   {
-    "id": "1ec2b9d8",
-    "execution_count": null,
-    "source_sha256": "1128c67d3e89a4af1696e14272d5b8352f691d007d6cb1c6300536977fbc2321",
-    "outputs_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-   },
-   {
-    "id": "ff5a6e94",
-    "execution_count": null,
-    "source_sha256": "8c3c32548d2fa92c6caeb4788c00e22b9f43f02a9f0f7ad8690794274ef8080f",
-    "outputs_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-   },
-   {
-    "id": "9b933602",
-    "execution_count": null,
-    "source_sha256": "a7a1bfedec00689068f1e744808f374fb53d75b364014fa7f361a32894295a59",
-    "outputs_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-   },
-   {
-    "id": "e49658a6",
-    "execution_count": null,
-    "source_sha256": "d905fd534e49d96ac6ecd935c5a3ce3a31669d2c9226b3aca4997880e3db7a09",
-    "outputs_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-   },
-   {
-    "id": "afe2d125",
-    "execution_count": null,
-    "source_sha256": "1b961cb6fecad0083846901da560341b2922c8b09921662adba3008978b7e363",
-    "outputs_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-   },
-   {
-    "id": "fd5c1587",
-    "execution_count": null,
-    "source_sha256": "f547cfbc6e77066a95f4aa1f0ab70453e2bc9c6caefa80b534f9c9a1ff611f8e",
     "outputs_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
    }
   ],
