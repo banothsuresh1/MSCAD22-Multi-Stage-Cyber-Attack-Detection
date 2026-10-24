@@ -155,6 +155,15 @@ def test_the_frozen_modules_are_byte_identical_to_main():
         assert name not in touched, name
 
 
+# Code cells changed by a LATER, separately authorised PR.  The two tests below
+# exist to prove the renumbering pass was presentation only, so a code cell that
+# moves has to be named here with the PR that moved it -- a reviewer can then
+# see the list did not grow quietly.
+CODE_CELLS_CHANGED_SINCE = {
+    "s12f-26": "PR #48: the Step 10 cell calls comparison.show_honest_step10",
+}
+
+
 def test_every_code_cell_from_preprocessing_onwards_is_unchanged():
     """The recorded digests are from BEFORE the renumbering."""
     nb = notebook()
@@ -169,8 +178,11 @@ def test_every_code_cell_from_preprocessing_onwards_is_unchanged():
         cell = current.get(row["id"])
         assert cell is not None, "code cell %s disappeared" % row["id"]
         assert cell.cell_type == "code", row["id"]
+        if row["id"] in CODE_CELLS_CHANGED_SINCE:
+            continue
         assert digest(cell.source) == row["sha256"], (
-            "code cell %s changed; only markdown headings may differ"
+            "code cell %s changed; only markdown headings may differ, unless "
+            "the cell is named in CODE_CELLS_CHANGED_SINCE with its PR"
             % row["id"])
 
 
@@ -183,8 +195,8 @@ def test_the_renumbering_touched_markdown_and_nothing_else():
                if digest(current[r["id"]].source) != r["sha256"]]
 
     assert changed, "nothing was renumbered at all"
-    assert all(r["cell_type"] == "markdown" for r in changed), [
-        r["id"] for r in changed if r["cell_type"] != "markdown"]
+    moved = [r["id"] for r in changed if r["cell_type"] != "markdown"]
+    assert set(moved) <= set(CODE_CELLS_CHANGED_SINCE), moved
 
 
 # ===========================================================================

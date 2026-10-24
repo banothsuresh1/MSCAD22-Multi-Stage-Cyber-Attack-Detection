@@ -1088,6 +1088,188 @@ FIGURE_FILES = {
 }
 
 
+# ===========================================================================
+# 12.x  THE HONEST TABLE: ONE DATASET PER TABLE
+# ===========================================================================
+# Each dataset has its own output root (outputs\ for the own extraction,
+# outputs_official\ for the published MSCAD.csv), and a configuration can be
+# finished in one and never trained in the other.  Today, under
+# DATASET_SOURCE = "official", only Approach 1 and Approach 2 have been
+# retrained; B1-B6 exist only in the own-extraction root.
+#
+# A row read from the other root would be a false statement, not a stale one:
+# the two datasets have different class counts (6 vs 7) and different label
+# distributions, so the numbers are not on the same scale.  Nothing below
+# falls back to the other root -- `in_active_root` is the assertion that says
+# so, and the pending rows say which dataset they are pending ON.
+
+
+def dataset_source() -> str:
+    """The dataset this run reads, as the tables name it."""
+    return str(getattr(config, "DATASET_SOURCE", "own"))
+
+
+def not_trained_here_text() -> str:
+    """The placeholder for a configuration missing from the ACTIVE root."""
+    return "not trained on %s" % dataset_source()
+
+
+def in_active_root(path: Path | str | None) -> bool:
+    """True only when `path` sits under config.OUTPUTS_ROOT.
+
+    Compared by path PARTS, never as text: "outputs" is a prefix of
+    "outputs_official", so a substring test would call a file in the own root
+    a file in the official one.
+    """
+    if path is None:
+        return False
+    root = Path(getattr(config, "OUTPUTS_ROOT", ""))
+    parts, root_parts = Path(path).parts, root.parts
+    return bool(root_parts) and parts[:len(root_parts)] == root_parts
+
+
+def results_in_active_root(order: Sequence[tuple[str, str]] | None = None
+                           ) -> tuple[list[str], list[str]]:
+    """(trained here, pending here) for the configurations in display order.
+
+    "Trained here" means the file exists AND is under the active root.  The
+    second half of that is the point: it is what makes a cross-root read
+    impossible rather than merely unlikely.
+    """
+    order = config.STEP12_DISPLAY_ORDER if order is None else order
+    here, pending = [], []
+    for key, _label in order:
+        path = result_path(key)
+        if in_active_root(path) and Path(path).exists():
+            here.append(key)
+        else:
+            pending.append(key)
+    return here, pending
+
+
+def active_root_provenance(order: Sequence[tuple[str, str]] | None = None
+                           ) -> pd.DataFrame:
+    """Every row, its state, and the exact file it was read from."""
+    order = config.STEP12_DISPLAY_ORDER if order is None else order
+    here, _pending = results_in_active_root(order)
+    rows = []
+    for key, label in order:
+        path = result_path(key)
+        rows.append({
+            "config": label,
+            "state": ("read from disk" if key in here
+                      else not_trained_here_text()),
+            # where it is, or where it WOULD be -- always under the active
+            # root, which is the whole point: there is nowhere else to look.
+            "metrics.json": "(unreachable here)" if path is None else str(path),
+            "file exists": "yes" if key in here else "no",
+            "under %s root" % dataset_source(): ("yes" if in_active_root(path)
+                                                 else "no"),
+        })
+    return pd.DataFrame(rows)
+
+
+def honest_comparison(order: Sequence[tuple[str, str]] | None = None,
+                      verbose: bool = True) -> dict[str, Any]:
+    """The comparison table with the pending rows naming the dataset.
+
+    `build_full_comparison` already leaves a missing row blank -- it reads one
+    path per configuration and that path is rooted at config.OUTPUTS_ROOT.
+    What this adds is the wording: a reader of the rendered table sees "not
+    trained on official" rather than a blank and an instruction, so the table
+    cannot be mistaken for eight results on one dataset.
+    """
+    order = config.STEP12_DISPLAY_ORDER if order is None else order
+    built = build_full_comparison(order=order, verbose=False)
+    here, pending = results_in_active_root(order)
+    labels = dict(order)
+
+    marked = mark_best(built["table"])
+    state = [key in here for key, _label in order]
+    for column in marked.columns:
+        if column == "config":
+            continue
+        marked[column] = [
+            # a descriptor a run did not record reads "-", never "NaN"
+            ("-" if pd.isna(value) else value) if is_here else
+            (not_trained_here_text() if column == "input features" else "-")
+            for value, is_here in zip(marked[column], state)]
+
+    trained = built["table"].loc[state].reset_index(drop=True)
+    return {"built": built, "table": built["table"], "marked": marked,
+            "trained": trained, "trained_keys": here, "pending_keys": pending,
+            "pending_labels": [labels[key] for key in pending],
+            "provenance": active_root_provenance(order),
+            "source": dataset_source()}
+
+
+def trained_only_table(honest: dict[str, Any]) -> pd.DataFrame:
+    """The trained configurations alone, with the full metric columns.
+
+    Two rows today (Approach 1 and Approach 2).  Best-value marking is done
+    over THESE rows only: marking over eight rows where six are blank says
+    "best of eight" for what is really "better of two".
+    """
+    return mark_best(honest["trained"]) if len(honest["trained"]) else \
+        pd.DataFrame(columns=COLUMNS)
+
+
+def show_honest_step10(majority_accuracy: float | None = None,
+                       random_macro_f1: float | None = None,
+                       order: Sequence[tuple[str, str]] | None = None,
+                       verbose: bool = True) -> dict[str, Any]:
+    """What the Step 10 notebook cell calls.  Nothing is trained or written.
+
+    The exports, checks and figures stay where they were: this calls
+    `run_step12_complete` quietly for them and then renders the honest view of
+    the same table, so the CSVs on disk and the table on screen are the same
+    numbers.
+    """
+    order = config.STEP12_DISPLAY_ORDER if order is None else order
+    full = run_step12_complete(majority_accuracy=majority_accuracy,
+                               random_macro_f1=random_macro_f1, verbose=False)
+    honest = honest_comparison(order=order, verbose=False)
+    honest["complete"] = full
+    source = honest["source"]
+
+    if verbose:
+        show_title("10.x -- the comparison, one dataset only", level=4)
+        show_note(
+            "Only **%d of %d** configurations have been retrained on the "
+            "**%s** dataset: %s. The rest are listed as `%s`; their earlier "
+            "results in the other output root are NOT repeated here, because "
+            "the two datasets have different class counts (6 vs 7) and "
+            "different label distributions, so a row-by-row comparison across "
+            "them is not valid."
+            % (len(honest["trained_keys"]), len(order), source,
+               ", ".join("`%s`" % key for key in honest["trained_keys"]),
+               not_trained_here_text()))
+        show_table(honest["marked"], all_columns=True,
+                   note="Every filled row read from a metrics.json under `%s`. "
+                        "`*` marks the best value in a column among the rows "
+                        "that have one; lower is better for the FPR, the "
+                        "parameter count and the times."
+                        % config.OUTPUTS_ROOT
+                        + ("" if majority_accuracy is None else
+                           " The majority-class accuracy is %.4f."
+                           % majority_accuracy))
+        pair = trained_only_table(honest)
+        if len(pair):
+            show_title("Approach 1 vs Approach 2 (the %s dataset)" % source,
+                       level=5)
+            show_table(pair, all_columns=True,
+                       note="The configurations actually trained on this "
+                            "dataset, with the full metric columns and the "
+                            "best value marked over these rows only.")
+        show_table(honest["provenance"], all_columns=True,
+                   note="Where each row came from. Every path is under the "
+                        "active output root, including the rows with no file: "
+                        "a pending row is pending because nothing exists "
+                        "THERE, never because it was filled from the other "
+                        "root.")
+    return honest
+
+
 def model_colour(key: str) -> str:
     """One fixed colour per configuration, used by every Step 12 figure."""
     colours = getattr(config, "MODEL_COLOURS", {}) or {}
