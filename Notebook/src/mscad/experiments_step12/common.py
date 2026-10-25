@@ -232,10 +232,18 @@ def step12_results_here() -> list[str]:
 # numbers; `ok` is False, because nothing was verified.
 #
 # What still RAISES, because it is a misconfiguration rather than a missing
-# result: a DATASET_SOURCE that is not one of the two datasets, an output root
-# that is not on this machine at all (the Windows-path guard), and an output
-# root that does not exist on disk.  Rendering "not trained on official" for
-# those would hide a typo behind eight pending rows.
+# result: a DATASET_SOURCE that is not one of the two datasets, and an output
+# root that is not on this machine at all (the Windows-path guard, raised by
+# `run_one` through `metrics_path(key) is None`).  Rendering "not trained on
+# official" for a typo would hide it behind eight pending rows.
+#
+# An output root that simply DOES NOT EXIST is not in that list, and must not
+# be: it is indistinguishable from "nothing has been run against this dataset
+# yet", which is precisely the pending case.  PR #49 raised for it and that was
+# wrong -- on Windows, where only outputs_official\ exists, every Step 10
+# section died with "the own output root does not exist" instead of rendering.
+# The check could not see it on Linux, where that path is refused by the
+# Windows-path guard before the existence test is reached.
 
 
 def refuse_if_the_root_is_not_a_root(key: str) -> None:
@@ -248,18 +256,10 @@ def refuse_if_the_root_is_not_a_root(key: str) -> None:
             "output root to read %s from. Set it in config.py (or the "
             "MSCAD_DATASET_SOURCE environment variable) and run this again."
             % (source, sorted(known), display_label(key)))
-    # Only a root this machine can read can be checked for existence.  One it
-    # cannot read is the Windows-path guard, and `run_one` has already raised
-    # for that through `metrics_path(key) is None`; raising again here would
-    # also fire for a caller that redirected the step folders but not the root.
-    root = config.usable_output_dir(getattr(config, "OUTPUTS_ROOT", ""))
-    if root is not None and not Path(root).exists():
-        raise Step12ConfigError(
-            "the %s output root does not exist, so nothing has been run "
-            "against this dataset at all:\n    missing root: %s\n"
-            "This is a configuration problem, not a pending result: check "
-            "DATASET_SOURCE and MSCAD_DATA_ROOT before reading any table."
-            % (source, root))
+    # An absent output root is deliberately NOT an error here: see the note
+    # above.  The Windows-path guard has already run in `run_one`, and a root
+    # that exists but holds no result for this configuration is the pending
+    # case the caller is about to render.
 
 
 def pending_result(key: str, components: dict[str, Any] | None = None,
