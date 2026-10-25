@@ -1594,7 +1594,7 @@ STEP12_FULL_FILES = {
 # must still produce these numbers after the integration (4 decimals, 5e-5).
 # A key that is absent from the saved results is reported as skipped, never
 # silently passed.
-STEP12_EXPECTED_ROWS = {
+STEP12_EXPECTED_ROWS_OWN = {
     "proposed": {"accuracy": 0.9896, "f1_macro": 0.7170, "g_mean": 0.7505},
     "baseline1_ae_cnn_lstm": {"accuracy": 0.9859, "f1_macro": 0.6848,
                               "g_mean": 0.7388},
@@ -1605,6 +1605,23 @@ STEP12_EXPECTED_ROWS = {
     "baseline4_ae_pca_lstm": {"accuracy": 0.9851, "f1_macro": 0.5735,
                               "g_mean": 0.6384},
 }
+# Those figures were measured on the OWN EXTRACTION.  The official dataset has
+# six classes instead of seven and a different label distribution, so its runs
+# cannot reproduce them: checking against them reported [FAIL] on every row and
+# meant only "these are the other dataset's numbers".  So the dict the check
+# reads is chosen by DATASET_SOURCE, and under "official" it is deliberately
+# EMPTY -- the check reports [SKIP], naming what to record, rather than a red
+# cross that carries no information.
+#
+# To switch it on for the official dataset, put its rows here, read from the
+# saved metrics.json files -- NOT from a fresh run. The point of this check is
+# to catch a number moving after the write-up quotes it, and a dict filled from
+# the current run would only ever compare that run with itself.
+STEP12_EXPECTED_ROWS_OFFICIAL: dict = {}
+
+# One live dict, so a caller (and a test) can still override it in one place.
+STEP12_EXPECTED_ROWS = dict(STEP12_EXPECTED_ROWS_OFFICIAL if RUNNING_OFFICIAL
+                            else STEP12_EXPECTED_ROWS_OWN)
 STEP12_EXPECTED_TOLERANCE = 5e-5      # on values rounded to 4 decimals
 STEP12_EXACT_TOLERANCE = 1e-9         # saved metrics.json against rebuilt rows
 

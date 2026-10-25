@@ -436,6 +436,21 @@ def mark_best(table: pd.DataFrame) -> pd.DataFrame:
 # ===========================================================================
 # 12.x  THE GUARANTEE: EXISTING NUMBERS MUST NOT MOVE
 # ===========================================================================
+def published_figures() -> dict[str, dict[str, float]]:
+    """The write-up's figures for the ACTIVE dataset, or an empty dict.
+
+    config.STEP12_EXPECTED_ROWS holds the figures for the dataset this run
+    reads: the own extraction's, or -- under DATASET_SOURCE = "official" --
+    nothing, until the official numbers the write-up quotes are recorded in
+    config.STEP12_EXPECTED_ROWS_OFFICIAL.  Checking official results against
+    the own extraction's figures reported [FAIL] on every row: correct, in that
+    the numbers differ, and useless, because they are a different dataset's
+    numbers over a different class count.  Empty means [SKIP] with the reason,
+    which is an honest "not checked".
+    """
+    return dict(getattr(config, "STEP12_EXPECTED_ROWS", None) or {})
+
+
 def check_rows_unchanged(built: dict[str, Any],
                          verbose: bool = True) -> tuple[pd.DataFrame, bool]:
     """Both checks from the brief: exact against disk, readable against print.
@@ -481,7 +496,16 @@ def check_rows_unchanged(built: dict[str, Any],
                       % (worst, Path(str(result_path(key))).name,
                          "" if ok else " at %s" % worst_column)})
 
-    for key, expected in config.STEP12_EXPECTED_ROWS.items():
+    expected_rows = published_figures()
+    if not expected_rows:
+        rows.append({
+            "check": "published figures",
+            "result": "[SKIP]",
+            "detail": "no figures are recorded for the %s dataset, so there is "
+                      "nothing to compare; record them in "
+                      "config.STEP12_EXPECTED_ROWS_OFFICIAL once the write-up "
+                      "quotes them" % dataset_source()})
+    for key, expected in expected_rows.items():
         metrics = built["metrics"].get(key)
         if metrics is None:
             rows.append({"check": "published figures: %s" % key,
@@ -2012,6 +2036,15 @@ def verify_rows_against_disk(table: pd.DataFrame,
                          "columns compared": 0, "largest difference": np.nan,
                          "result": "[SKIP]"})
             continue
+        # The SAME enrichment the table was built with.  Step 11 never recorded
+        # Approach 1's parameter count, latent width or seed, so `_with_
+        # descriptors` reads them from step10\model_card.json and step6's
+        # selected_features.json -- saved files, nothing recomputed.  Rebuilding
+        # from the raw metrics.json instead compared 50,438 parameters against
+        # `null` and reported an infinite difference: a [FAIL] that said the
+        # table disagreed with disk when it did not.  Every number still comes
+        # from a file on disk; this reads the same files the row did.
+        metrics = _with_descriptors(key, metrics)
         built = _row_from_metrics(label, metrics)
         part = table[table["config"] == label]
         if not len(part):
