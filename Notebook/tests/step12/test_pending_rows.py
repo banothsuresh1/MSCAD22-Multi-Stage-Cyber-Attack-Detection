@@ -179,20 +179,15 @@ def test_a_misconfigured_dataset_source_still_raises(official_root,
     assert "DATASET_SOURCE is 'offical'" in str(error.value)
 
 
-def test_an_output_root_that_does_not_exist_still_raises(official_root,
-                                                         monkeypatch):
-    absent = official_root / "outputs_official_typo"
-    monkeypatch.setattr(config, "OUTPUTS_ROOT", absent, raising=False)
-
-    with pytest.raises(common.Step12ConfigError) as error:
-        common.run_one(B1, loader=refuse, verbose=False)
-
-    assert "output root does not exist" in str(error.value)
-
-
 def test_a_root_that_is_not_on_this_machine_still_raises(official_root,
                                                          monkeypatch):
-    """The Windows-path guard: unreadable here is not the same as missing."""
+    """The Windows-path guard: unreadable here is not the same as missing.
+
+    `running_on_windows` is patched off so the guard fires on Windows too --
+    there a C:\ path is perfectly readable, and the test asserted a refusal
+    that only ever happened on Linux.
+    """
+    monkeypatch.setattr(config, "running_on_windows", lambda: False)
     monkeypatch.setattr(config, "STEP12_OUTPUT_DIR",
                         PureWindowsPath(r"C:\MSCAD2022\outputs_official"
                                         r"\step12"), raising=False)
@@ -212,3 +207,31 @@ def test_the_lock_message_is_still_there_for_the_callers_that_want_it(
     message = str(error.value)
     assert "no saved result in the official output root" in message
     assert "LOCK_TRAINED_MODELS is True" in message
+
+
+# ===========================================================================
+# 4. the Windows regression: an absent root is PENDING, not a crash
+# ===========================================================================
+def test_an_absent_but_readable_output_root_is_pending_not_an_error(
+        tmp_path, monkeypatch):
+    """What Windows sees when only outputs_official\\ exists.
+
+    On Linux `C:\\MSCAD2022\\outputs` is refused by the Windows-path guard, so
+    `refuse_if_the_root_is_not_a_root` never looked at it.  On Windows the path
+    IS readable and simply does not exist -- which is "nothing has been run
+    against this dataset", the pending case, not a misconfiguration.  Raising
+    there took down all eight Step 10 sections.
+    """
+    absent = tmp_path / "outputs"                  # readable, does not exist
+    monkeypatch.setattr(config, "DATASET_SOURCE", "own", raising=False)
+    monkeypatch.setattr(config, "RUNNING_OFFICIAL", False, raising=False)
+    monkeypatch.setattr(config, "LOCK_TRAINED_MODELS", True, raising=False)
+    monkeypatch.setattr(config, "OUTPUTS_ROOT", absent, raising=False)
+    monkeypatch.setattr(config, "STEP12_OUTPUT_DIR", tmp_path / "redirected",
+                        raising=False)
+    assert not absent.exists()
+
+    result = common.run_one(B1, loader=refuse, trainer=refuse, verbose=False)
+
+    assert result["status"] == common.PENDING
+    assert result["ok"] is False
