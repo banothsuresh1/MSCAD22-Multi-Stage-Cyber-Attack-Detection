@@ -114,13 +114,26 @@ def test_a_label_column_among_the_features_is_refused():
     assert "Label_encoded" in str(err.value)
 
 
-def test_a_latent_dim_that_compresses_nothing_is_refused(monkeypatch):
+def test_a_latent_dim_larger_than_the_input_is_refused(monkeypatch):
+    """The guard refuses latent > input. Since the AE=30 sensitivity run
+    (commit 846a775) a latent width EQUAL to the input is allowed on purpose
+    -- the degenerate, non-compressing case the AE=30 configs use on the 30
+    selected features -- so only a latent LARGER than the input is an error."""
     X_train, X_test, y_train, y_test = write_step6()
-    monkeypatch.setattr(config, "AE_LATENT_DIM", N_FEATURES)
+    monkeypatch.setattr(config, "AE_LATENT_DIM", N_FEATURES + 1)
     with pytest.raises(ae.AutoencoderError) as err:
         ae.check_inputs(X_train, X_test, y_train, y_test, feature_names(),
                         verbose=False)
-    assert "compresses nothing" in str(err.value)
+    assert "cannot exceed the input" in str(err.value)
+
+
+def test_a_latent_dim_equal_to_the_input_is_allowed(monkeypatch):
+    """latent == input is the AE=30 degenerate case, allowed by design."""
+    X_train, X_test, y_train, y_test = write_step6()
+    monkeypatch.setattr(config, "AE_LATENT_DIM", N_FEATURES)
+    table, all_ok = ae.check_inputs(X_train, X_test, y_train, y_test,
+                                    feature_names(), verbose=False)
+    assert all_ok is True
 
 
 # ===========================================================================
