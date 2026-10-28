@@ -1230,9 +1230,11 @@ def honest_comparison(order: Sequence[tuple[str, str]] | None = None,
 def trained_only_table(honest: dict[str, Any]) -> pd.DataFrame:
     """The trained configurations alone, with the full metric columns.
 
-    Two rows today (Approach 1 and Approach 2).  Best-value marking is done
-    over THESE rows only: marking over eight rows where six are blank says
-    "best of eight" for what is really "better of two".
+    Best-value marking runs over THESE rows only: marking over eight rows
+    where six are blank says "best of eight" for what is really "better of
+    two".  `show_honest_step10` no longer renders this -- once every
+    configuration has a result it is the main table again -- so it is here for
+    a caller that wants the trained subset by itself.
     """
     return mark_best(honest["trained"]) if len(honest["trained"]) else \
         pd.DataFrame(columns=COLUMNS)
@@ -1258,16 +1260,29 @@ def show_honest_step10(majority_accuracy: float | None = None,
 
     if verbose:
         show_title("10.x -- the comparison, one dataset only", level=4)
-        show_note(
-            "Only **%d of %d** configurations have been retrained on the "
-            "**%s** dataset: %s. The rest are listed as `%s`; their earlier "
-            "results in the other output root are NOT repeated here, because "
-            "the two datasets have different class counts (6 vs 7) and "
-            "different label distributions, so a row-by-row comparison across "
-            "them is not valid."
-            % (len(honest["trained_keys"]), len(order), source,
-               ", ".join("`%s`" % key for key in honest["trained_keys"]),
-               not_trained_here_text()))
+        # The note has to read correctly both before and after every
+        # configuration is trained; "Only 8 of 8" was the old wording's answer
+        # to a complete root.
+        if not honest["pending_keys"]:
+            show_note(
+                "All **%d** configurations have a result on the **%s** "
+                "dataset, each read from its own metrics.json under `%s`. "
+                "Nothing is read from the other dataset's output root: the two "
+                "datasets have different class counts (6 vs 7) and different "
+                "label distributions, so a row-by-row comparison across them "
+                "would not be valid."
+                % (len(order), source, config.OUTPUTS_ROOT))
+        else:
+            show_note(
+                "**%d of %d** configurations have been retrained on the "
+                "**%s** dataset: %s. The rest are listed as `%s`; their "
+                "earlier results in the other output root are NOT repeated "
+                "here, because the two datasets have different class counts "
+                "(6 vs 7) and different label distributions, so a row-by-row "
+                "comparison across them is not valid."
+                % (len(honest["trained_keys"]), len(order), source,
+                   ", ".join("`%s`" % key for key in honest["trained_keys"]),
+                   not_trained_here_text()))
         show_table(honest["marked"], all_columns=True,
                    note="Every filled row read from a metrics.json under `%s`. "
                         "`*` marks the best value in a column among the rows "
@@ -1277,14 +1292,12 @@ def show_honest_step10(majority_accuracy: float | None = None,
                         + ("" if majority_accuracy is None else
                            " The majority-class accuracy is %.4f."
                            % majority_accuracy))
-        pair = trained_only_table(honest)
-        if len(pair):
-            show_title("Approach 1 vs Approach 2 (the %s dataset)" % source,
-                       level=5)
-            show_table(pair, all_columns=True,
-                       note="The configurations actually trained on this "
-                            "dataset, with the full metric columns and the "
-                            "best value marked over these rows only.")
+        # The "trained only" sub-table is NOT rendered here any more.  It was
+        # added when Approach 1 and Approach 2 were the only configurations
+        # with official results, so it carried two rows the main table left
+        # blank.  All eight are trained now, so it printed the same eight rows
+        # a second time.  `trained_only_table` is kept for a caller that wants
+        # the trained subset on its own.
         show_table(honest["provenance"], all_columns=True,
                    note="Where each row came from. Every path is under the "
                         "active output root, including the rows with no file: "
