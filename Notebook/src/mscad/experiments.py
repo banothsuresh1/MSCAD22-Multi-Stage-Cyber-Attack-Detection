@@ -225,7 +225,9 @@ def load_feature_source(source: str, verbose: bool = False) -> dict[str, Any]:
 
 def encode_with_new_ae(X_train: pd.DataFrame, X_test: pd.DataFrame,
                        y_train: pd.DataFrame, out_folder: Path,
-                       epochs: int | None = None, verbose: bool = False):
+                       epochs: int | None = None,
+                       latent_dim: int | None = None,
+                       verbose: bool = False):
     """Train a baseline autoencoder on the TRAINING rows, then encode both sides.
 
     Calls autoencoder.train_autoencoder unchanged, so the hyperparameters are
@@ -233,7 +235,7 @@ def encode_with_new_ae(X_train: pd.DataFrame, X_test: pd.DataFrame,
     finished encoder and never contribute to fitting it.
     """
     autoencoder, encoder, history, info = ae.train_autoencoder(
-        X_train, y_train, epochs=epochs, verbose=False)
+        X_train, y_train, epochs=epochs, latent_dim=latent_dim, verbose=False)
     encode = ae.make_encoder_function(encoder, list(X_train.columns))
     Z_train = encode(X_train, what="the training features")
     Z_test = encode(X_test, what="the test features")
@@ -244,7 +246,9 @@ def encode_with_new_ae(X_train: pd.DataFrame, X_test: pd.DataFrame,
     history.to_csv(out_folder / "ae_history.csv", index=False)
     (out_folder / "ae_config.json").write_text(json.dumps({
         "features": list(X_train.columns), "n_features": X_train.shape[1],
-        "latent_dim": config.AE_LATENT_DIM, "hidden": list(config.AE_HIDDEN),
+        "latent_dim": int(config.AE_LATENT_DIM if latent_dim is None
+                          else latent_dim),
+        "hidden": list(config.AE_HIDDEN),
         "epochs_run": info["epochs_run"], "best_epoch": info["best_epoch"],
         "train_mse": info["train_mse"], "val_mse": info["val_mse"],
         "trained_on": "the TRAINING rows only",

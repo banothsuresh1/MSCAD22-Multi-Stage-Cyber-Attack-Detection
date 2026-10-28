@@ -46,12 +46,19 @@ FIXTURE = Path(__file__).resolve().parent / "data" / "notebook_cell_identity.jso
 # step12_checks.py are NOT here -- they build Step 10's report, they train
 # nothing, and the Approach 1 row fix had to change them.
 FROZEN_MODULES = (
-    "splitting.py", "feature_selection.py", "autoencoder.py", "imbalance.py",
+    "splitting.py", "feature_selection.py", "imbalance.py",
     "models.py", "models_attention.py", "evaluation.py",
-    "experiments.py", "experiments_pca.py", "experiments_baseline5.py",
+    "experiments_pca.py", "experiments_baseline5.py",
     "experiments_baseline6.py", "fusion.py", "fusion_all.py",
     "explainability.py", "explainability_all.py",
 )
+# PR #54 (AE latent-30 sensitivity): autoencoder.py and experiments.py are no
+# longer in that tuple.  Each gained ONE parameter, `latent_dim=None`, which
+# means config.AE_LATENT_DIM -- what every existing caller already got.  No
+# training logic moved, and tests/test_ae30_sensitivity.py proves both halves:
+# latent_dim=30 gives a 30-wide encoding, and the default still gives 15.
+# They remain in STEP_1_AND_2_MODULES, so they may differ from main but are
+# still named there rather than unchecked.
 
 # The twelve headings of the simplified flow, in order.
 NEW_HEADINGS = [
@@ -133,6 +140,16 @@ STEP_1_AND_2_MODULES = {
 # Step 10's runner, which trains nothing either: PR #49 turns a missing result
 # into a pending ROW instead of an exception that took the whole cell down.
 STEP_1_AND_2_MODULES = STEP_1_AND_2_MODULES | {"common.py"}
+# PR #54 (AE latent-30 sensitivity): both gain a `latent_dim` parameter whose
+# default is None, i.e. config.AE_LATENT_DIM -- the behaviour every existing
+# caller already had.  No training logic is changed.
+STEP_1_AND_2_MODULES = STEP_1_AND_2_MODULES | {"autoencoder.py",
+                                               "experiments.py"}
+
+# PR #54: a NEW folder, which cannot change the frozen modules by existing.
+# Its own rule -- that it imports the trainers instead of copying them -- is
+# checked in tests/test_ae30_sensitivity.py.
+NEW_FOLDERS = ("src/mscad/experiments_step12_ae30/",)
 
 
 def test_the_frozen_modules_are_byte_identical_to_main():
@@ -151,6 +168,8 @@ def test_the_frozen_modules_are_byte_identical_to_main():
     changed = [line.strip() for line in
                git("diff", "--name-only", base, "--", "Notebook/src/mscad/"
                    ).splitlines() if line.strip()]
+    changed = [name for name in changed
+               if not any(folder in name for folder in NEW_FOLDERS)]
     touched = {Path(name).name for name in changed}
 
     assert touched <= STEP_1_AND_2_MODULES, sorted(touched)

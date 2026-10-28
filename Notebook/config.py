@@ -2175,3 +2175,42 @@ if RUNNING_OFFICIAL:
 else:
     SKIP_STEPS = []
     SKIP_STEPS_NOTE = ""
+
+
+# ===========================================================================
+# 10.y  AUTOENCODER BOTTLENECK SENSITIVITY (latent dim = 30)
+# ===========================================================================
+# A SECOND output root, so the published AE=15 results cannot be touched.  The
+# eight configurations are re-run with the autoencoder bottleneck at 30 instead
+# of 15 and written to outputs_official_ae30\; nothing under outputs_official\
+# is opened for writing by that run, and LOCK_TRAINED_MODELS keeps protecting
+# it either way.
+#
+# Two caveats that belong beside the numbers rather than in a footnote:
+#
+#   * Approach 1 and Baseline 5 start from the 30 SELECTED features, so a
+#     latent width of 30 is not a bottleneck at all -- their autoencoder maps
+#     30 -> 30 and compresses nothing.  Their AE=30 rows measure "an
+#     autoencoder that cannot compress" against "30 -> 15", which is a fair
+#     question but not the same question as for the 67-feature rows.
+#   * Baseline 3 has no autoencoder, so its row is insensitive to the latent
+#     width by construction and is the AE=15 row.
+#
+# Baseline 4 keeps PCA_N_COMPONENTS = 0.95, a VARIANCE TARGET: the number of
+# components it keeps out of 30 is whatever reaches 95% of the variance, and is
+# not assumed to be any particular count.  Baseline 6 keeps its fixed
+# B6_PCA_COMPONENTS = 3, because build_cnn_lstm refuses a sequence shorter than
+# CNN_KERNEL.
+OUTPUTS_ROOT_AE30 = DATA_ROOT / "outputs_official_ae30"
+AE_LATENT_DIM_AE30 = 30
+
+# This root's OWN lock, independent of LOCK_TRAINED_MODELS.  False while the
+# eight configurations are being trained, True afterwards -- the same contract
+# as the main lock, for a root that starts empty.
+LOCK_TRAINED_MODELS_AE30 = False
+
+# The AE=30 run reads Steps 5 and 6 (the split and the selected features) from
+# the ACTIVE root, because they are properties of the dataset and not of the
+# bottleneck, and writes Steps 7 to 12 into the AE=30 root.
+AE30_REDIRECTED_STEPS = (7, 8, 9, 10, 11, 12)
+AE30_INPUT_STEPS = (5, 6)
