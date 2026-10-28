@@ -193,8 +193,10 @@ def check_inputs(X_train: pd.DataFrame, X_test: pd.DataFrame,
     add("more training rows than one batch", enough,
         "%s rows, batch %d" % (f"{len(X_train):,}", config.AE_BATCH_SIZE))
 
-    latent_ok = config.AE_LATENT_DIM < len(feature_order)
-    add("the latent dimension is smaller than the input", latent_ok,
+    latent_ok = config.AE_LATENT_DIM <= len(feature_order)
+    add("the latent dimension is no larger than the input "
+        "(equal means a degenerate, non-compressing autoencoder -- by design "
+        "for the AE=30 sensitivity run)", latent_ok,
         "%d -> %s -> %d" % (len(feature_order), config.AE_HIDDEN,
                             config.AE_LATENT_DIM))
 
@@ -223,12 +225,10 @@ def check_inputs(X_train: pd.DataFrame, X_test: pd.DataFrame,
                "X_test": len(X_test), "y_test": len(y_test)})
     if not latent_ok:
         raise AutoencoderError(
-            "[FAIL] AE_LATENT_DIM is %d but there are only %d features, so the "
-            "'bottleneck' compresses nothing."
+            "[FAIL] AE_LATENT_DIM is %d but there are only %d features -- the "
+            "latent width cannot exceed the input."
             % (config.AE_LATENT_DIM, len(feature_order)))
     return table, all_ok
-
-
 # ===========================================================================
 # 7.2  BUILD
 # ===========================================================================
