@@ -147,15 +147,27 @@ def test_a_wrapper_calls_an_existing_trainer_and_builds_no_model(name):
 
 
 def test_baseline3_carries_the_ae15_result_and_says_so(two_roots):
-    """No autoencoder, so the latent width cannot change it."""
+    """No autoencoder, so the latent width cannot change it.
+
+    Exercised through the public run(): commit 846a775 moved the copy into
+    _make_train(source), binding the AE=15 source path BEFORE the ae30()
+    redirect (otherwise it would read the empty AE=30 root), so there is no
+    longer a module-level train() to call directly.
+    """
+    import json
+
     module = module_for("baseline3_ae30")
+    ae15_source = cmp.result_path(module.KEY)      # official root, before redirect
 
-    out = module.train(verbose=False)
+    result = module.run(verbose=False)
 
-    assert out["status"] == "copied_from_ae15"
-    assert out["metrics"]["latent_dim_insensitive"] is True
-    assert "no autoencoder" in out["metrics"]["note"]
-    assert str(cmp.result_path(module.KEY)) == out["metrics"]["copied_from"]
+    assert result["status"] == c30.TRAINED         # a copy counts as produced here
+    saved = json.loads(Path(result["metrics_path"]).read_text(encoding="utf-8"))
+    assert saved["latent_dim_insensitive"] is True
+    assert "no autoencoder" in saved["note"]
+    assert saved["copied_from"] == str(ae15_source)
+    # and the copy landed in the AE=30 root, not the official one
+    assert c30.inside_ae30(result["metrics_path"])
 
 
 # ===========================================================================
