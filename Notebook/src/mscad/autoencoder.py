@@ -289,8 +289,15 @@ def architecture_table(autoencoder, latent_name: str = "latent") -> pd.DataFrame
 # 7.3  TRAIN -- training rows only
 # ===========================================================================
 def train_autoencoder(X_train: pd.DataFrame, y_train: pd.DataFrame,
-                      epochs: int | None = None, verbose: bool = True):
-    """Fit on the training rows, early-stopping on an inner stratified split."""
+                      epochs: int | None = None, latent_dim: int | None = None,
+                      verbose: bool = True):
+    """Fit on the training rows, early-stopping on an inner stratified split.
+
+    `latent_dim` defaults to None, which means config.AE_LATENT_DIM -- the
+    behaviour every existing caller already had.  It is a parameter so the
+    bottleneck-sensitivity run can ask for a width explicitly instead of
+    depending on what config happens to hold at the time.
+    """
     keras = _keras()
     from sklearn.model_selection import train_test_split
 
@@ -312,7 +319,8 @@ def train_autoencoder(X_train: pd.DataFrame, y_train: pd.DataFrame,
         shuffle=True, stratify=stratify)
     X_fit, X_val = values[fit_idx], values[val_idx]
 
-    autoencoder, encoder = build_autoencoder(X_train.shape[1])
+    autoencoder, encoder = build_autoencoder(X_train.shape[1],
+                                             latent_dim=latent_dim)
     stopper = keras.callbacks.EarlyStopping(
         monitor="val_loss", patience=config.AE_PATIENCE,
         restore_best_weights=True, verbose=0)
