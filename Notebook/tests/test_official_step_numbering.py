@@ -149,7 +149,11 @@ STEP_1_AND_2_MODULES = STEP_1_AND_2_MODULES | {"autoencoder.py",
 # PR #54: a NEW folder, which cannot change the frozen modules by existing.
 # Its own rule -- that it imports the trainers instead of copying them -- is
 # checked in tests/test_ae30_sensitivity.py.
-NEW_FOLDERS = ("src/mscad/experiments_step12_ae30/",)
+NEW_FOLDERS = ("src/mscad/experiments_step12_ae30/",
+               # PR #55 (paper replication): a NEW folder, additive, cannot
+               # change a frozen module by existing; it imports the evaluator
+               # and builds its own models, checked in test_paper_replication.
+               "src/mscad/experiments_step12_paper_replication/")
 
 
 def test_the_frozen_modules_are_byte_identical_to_main():
