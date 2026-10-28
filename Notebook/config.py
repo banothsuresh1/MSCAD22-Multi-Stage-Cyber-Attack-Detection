@@ -2214,3 +2214,23 @@ LOCK_TRAINED_MODELS_AE30 = False
 # bottleneck, and writes Steps 7 to 12 into the AE=30 root.
 AE30_REDIRECTED_STEPS = (7, 8, 9, 10, 11, 12)
 AE30_INPUT_STEPS = (5, 6)
+
+
+# ===========================================================================
+# PAPER REPLICATION  (AE 66->64, PCA->30, LSTM 1024/512) -- additive
+# ===========================================================================
+# A THIRD output root, beside outputs_official\ and outputs_official_ae30\, so
+# a replication of the published "Fusion of linear and non-linear
+# dimensionality reduction ... LSTM-based IDS" AE+PCA+LSTM pipeline can be run
+# and compared against B4 WITHOUT touching any existing result.  The pipeline's
+# hyperparameters are NOT here: they are the paper's, hardcoded in
+# src/mscad/experiments_step12_paper_replication/baseline_ae64_pca30_lstm.py,
+# deliberately kept out of the shared AE_* / N_SELECTED_FEATURES constants so
+# this variant can never read or move the AE=15 / AE=30 pipelines' state.  Only
+# the root and its own lock live here, mirroring OUTPUTS_ROOT_AE30.
+OUTPUTS_ROOT_PAPER = DATA_ROOT / "outputs_official_paper_replication"
+
+# This root's OWN lock, independent of LOCK_TRAINED_MODELS and
+# LOCK_TRAINED_MODELS_AE30.  False while the single configuration is trained,
+# True afterwards.
+LOCK_TRAINED_MODELS_PAPER = False
