@@ -251,3 +251,79 @@ def test_the_saved_metrics_are_readable_as_json(synthetic_official,
     assert saved["paper_replication"] is True
     assert saved["hyperparameters"]["source"].startswith("paper")
     assert saved["hyperparameters"]["lstm"]["units"] == [1024, 512]
+
+
+# ===========================================================================
+# 4. B4 vs paper render (reads both roots, writes neither)
+# ===========================================================================
+def _metrics(acc, f1, feats, latent, pca=None):
+    out = {"full": {"accuracy": acc, "precision_macro": f1, "recall_macro": f1,
+                    "f1_macro": f1, "f1_weighted": acc, "g_mean": f1,
+                    "roc_auc": {"macro": 0.99}},
+           "duplicate_free": {"f1_macro": f1, "g_mean": f1},
+           "binary": {"f1": 0.9, "false_positive_rate": 0.1},
+           "inference": {"ms_per_1000_flows": 30.0},
+           "n_input_features": feats, "latent_dim": latent,
+           "parameters": 21446, "training_seconds": 100.0}
+    if pca:
+        out["pca_components"] = pca
+    return out
+
+
+def test_b4_vs_paper_renders_both_rows_from_their_own_roots(tmp_path,
+                                                            monkeypatch):
+    from src.mscad import comparison as cmp
+    official = tmp_path / "outputs_official"
+    paper = tmp_path / "outputs_official_paper_replication"
+    monkeypatch.setattr(config, "OUTPUTS_ROOT", official, raising=False)
+    monkeypatch.setattr(config, "OUTPUTS_DIR", official, raising=False)
+    monkeypatch.setattr(config, "STEP12_OUTPUT_DIR", official / "step12",
+                        raising=False)
+    monkeypatch.setattr(config, "OUTPUTS_ROOT_PAPER", paper, raising=False)
+
+    b4_path = Path(cmp.result_path(cp.B4_KEY))     # official step12\<key>\
+    b4_path.parent.mkdir(parents=True, exist_ok=True)
+    b4_path.write_text(json.dumps(
+        {"label": "B4: AE -> PCA -> LSTM", **_metrics(0.9629, 0.6342, 67, 15, 6)}),
+        encoding="utf-8")
+    pp = Path(cp.metrics_path(pr.NAME))
+    pp.parent.mkdir(parents=True, exist_ok=True)
+    pp.write_text(json.dumps(
+        {"label": pr.LABEL, **_metrics(0.80, 0.55, 66, 64, 30)}),
+        encoding="utf-8")
+
+    out = cp.b4_vs_paper(verbose=False)
+
+    assert out["loaded"] == ["B4", "paper"]
+    table = out["table"]
+    assert len(table) == 2
+    assert list(table.columns) == cmp.COLUMNS
+    assert table.iloc[0]["config"].startswith("B4")
+    assert "Paper" in table.iloc[1]["config"]
+    assert table.iloc[0]["input features"] == 67
+    assert table.iloc[1]["input features"] == 66
+    assert float(table.iloc[0]["accuracy"]) == 0.9629
+    assert float(table.iloc[1]["accuracy"]) == 0.80
+
+
+def test_b4_vs_paper_shows_a_pending_row_when_the_paper_result_is_missing(
+        tmp_path, monkeypatch):
+    from src.mscad import comparison as cmp
+    official = tmp_path / "outputs_official"
+    paper = tmp_path / "outputs_official_paper_replication"
+    monkeypatch.setattr(config, "OUTPUTS_ROOT", official, raising=False)
+    monkeypatch.setattr(config, "OUTPUTS_DIR", official, raising=False)
+    monkeypatch.setattr(config, "STEP12_OUTPUT_DIR", official / "step12",
+                        raising=False)
+    monkeypatch.setattr(config, "OUTPUTS_ROOT_PAPER", paper, raising=False)
+    b4_path = Path(cmp.result_path(cp.B4_KEY))
+    b4_path.parent.mkdir(parents=True, exist_ok=True)
+    b4_path.write_text(json.dumps(
+        {"label": "B4: AE -> PCA -> LSTM", **_metrics(0.9629, 0.6342, 67, 15, 6)}),
+        encoding="utf-8")
+
+    out = cp.b4_vs_paper(verbose=False)
+
+    assert out["loaded"] == ["B4"]                 # paper absent
+    paper_row = out["table"].iloc[1]
+    assert str(paper_row["input features"]).startswith(config.NOT_TRAINED_TEXT)

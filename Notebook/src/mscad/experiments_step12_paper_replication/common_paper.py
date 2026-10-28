@@ -24,6 +24,8 @@ import contextlib
 import json
 import sys
 from pathlib import Path
+
+import pandas as pd
 from typing import Any, Callable, Iterator
 
 _PROJECT_DIR = Path(__file__).resolve().parent.parent.parent.parent
@@ -143,6 +145,76 @@ def inputs(verbose: bool = False) -> dict[str, Any]:
     on the same rows as B4.
     """
     return base.evaluation_inputs(verbose=verbose)
+
+
+# ===========================================================================
+# B4 vs the paper replication, in comparison.py's own columns
+# ===========================================================================
+# The replication writes to its OWN root, so comparison.build_full_comparison
+# (which reads step12\<key>\ under the active root) does not pick it up.  This
+# builds the comparison the thesis wants -- B4 beside the paper row -- using
+# comparison._row_from_metrics, the SAME row builder every existing table uses,
+# so the columns, the formatting and the best-value marking are identical to
+# 10.10.  It READS B4 from the official root and the paper result from the
+# replication root; it writes nothing.
+B4_KEY = "baseline4_ae_pca_lstm"
+
+
+def _paper_name_and_label():
+    """The replication's config NAME/LABEL, imported lazily to avoid a cycle."""
+    from . import baseline_ae64_pca30_lstm as paper
+    return paper.NAME, paper.LABEL
+
+
+def _load(path):
+    return (json.loads(Path(path).read_text(encoding="utf-8"))
+            if path is not None and Path(path).exists() else None)
+
+
+def b4_vs_paper(verbose=True):
+    """A two-row table: B4 (official) and the paper replication.
+
+    Same columns as 10.10.  A configuration with no saved result shows a
+    `not trained` row rather than being dropped, so the cell renders before the
+    replication has been run.
+    """
+    from .. import comparison as cmp
+    from .. import data_loading as dl
+
+    name, label = _paper_name_and_label()
+    rows, loaded = [], []
+
+    b4 = _load(cmp.result_path(B4_KEY))            # official step12\<key>\
+    if b4 is not None:
+        rows.append(cmp._row_from_metrics(
+            b4.get("label", "B4: AE -> PCA -> LSTM"), b4))
+        loaded.append("B4")
+    else:
+        rows.append(cmp._blank_row("B4: AE -> PCA -> LSTM"))
+
+    paper = _load(metrics_path(name))              # the replication root
+    if paper is not None:
+        rows.append(cmp._row_from_metrics(paper.get("label", label), paper))
+        loaded.append("paper")
+    else:
+        rows.append(cmp._blank_row(label))
+
+    table = pd.DataFrame(rows)[cmp.COLUMNS]
+    marked = cmp.mark_best(table)
+    if verbose:
+        dl.show_table(marked, all_columns=True,
+                      note="B4 (our AE->PCA->LSTM, 67 features, from "
+                           "outputs_official) beside the paper replication "
+                           "(66 features, AE->64, PCA->30, LSTM 1024/512, from "
+                           "outputs_official_paper_replication). `*` marks the "
+                           "better of the two in each column; lower is better "
+                           "for FPR, params and the times. A row reading `%s` "
+                           "has no saved result yet." % config.NOT_TRAINED_TEXT)
+        if "paper" not in loaded:
+            dl.show_note(
+                "The paper replication has not been run yet, so its row is "
+                "blank. Run it with the lock off and re-run this cell.")
+    return {"table": table, "marked": marked, "loaded": loaded}
 
 
 # ===========================================================================
