@@ -57,29 +57,35 @@ NOTE = (
 )
 
 
-def train(verbose: bool = True) -> dict[str, Any]:
-    """Copy the AE=15 result, recording in the file that it is a copy."""
-    import json
+def _make_train(source: Path | None):
+    """Bind the AE=15 source path, resolved BEFORE the AE=30 redirect."""
+    def train(verbose: bool = True) -> dict[str, Any]:
+        """Copy the AE=15 result, recording in the file that it is a copy."""
+        import json
 
-    from .. import comparison as cmp
+        if source is None or not Path(source).exists():
+            raise c30.Ae30Error(
+                "Baseline 3 has no AE=15 result to carry over, and it has no "
+                "autoencoder to retrain:\n    missing: %s\n"
+                "Run Baseline 3 in the AE=15 table first." % source)
+        metrics = json.loads(Path(source).read_text(encoding="utf-8"))
+        metrics = {**metrics,
+                   "copied_from": str(source),
+                   "latent_dim_insensitive": True,
+                   "note": "no autoencoder, so the latent width cannot change this "
+                           "result; this is the AE=15 run, not a second training"}
+        return {"metrics": metrics, "status": "copied_from_ae15"}
+    return train
 
-    source = cmp.result_path(KEY)
-    if source is None or not Path(source).exists():
-        raise c30.Ae30Error(
-            "Baseline 3 has no AE=15 result to carry over, and it has no "
-            "autoencoder to retrain:\n    missing: %s\n"
-            "Run Baseline 3 in the AE=15 table first." % source)
-    metrics = json.loads(Path(source).read_text(encoding="utf-8"))
-    metrics = {**metrics,
-               "copied_from": str(source),
-               "latent_dim_insensitive": True,
-               "note": "no autoencoder, so the latent width cannot change this "
-                       "result; this is the AE=15 run, not a second training"}
-    return {"metrics": metrics, "status": "copied_from_ae15"}
 
 def run(verbose: bool = True) -> dict[str, Any]:
-    return c30.run_one_ae30(KEY, train, components=COMPONENTS, note=NOTE,
-                            verbose=verbose)
+    from .. import comparison as cmp
+
+    # Resolved HERE, before run_one_ae30 enters the ae30() redirect, so this
+    # is the AE=15 path -- not the (empty, about-to-be-created) AE=30 one.
+    source = cmp.result_path(KEY)
+    return c30.run_one_ae30(KEY, _make_train(source), components=COMPONENTS,
+                            note=NOTE, verbose=verbose)
 
 
 if __name__ == "__main__":                                  # pragma: no cover

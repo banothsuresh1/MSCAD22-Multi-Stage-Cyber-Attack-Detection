@@ -883,7 +883,7 @@ PEARSON_THRESHOLD = 0.95
 PEARSON_REPORT_LOWER = 0.80
 
 # 6.6 -- how many features survive.
-N_SELECTED_FEATURES = 30
+N_SELECTED_FEATURES = 40
 
 # 6.4 -- permutation importance.
 # An inner split of the TRAINING set only: fit the forest on one part, measure
