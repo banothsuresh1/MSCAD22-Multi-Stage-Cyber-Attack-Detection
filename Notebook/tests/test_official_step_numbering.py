@@ -153,7 +153,9 @@ NEW_FOLDERS = ("src/mscad/experiments_step12_ae30/",
                # PR #55 (paper replication): a NEW folder, additive, cannot
                # change a frozen module by existing; it imports the evaluator
                # and builds its own models, checked in test_paper_replication.
-               "src/mscad/experiments_step12_paper_replication/")
+               "src/mscad/experiments_step12_paper_replication/",
+               # PR #59 (AE=64 sensitivity): additive sibling folder
+               "src/mscad/experiments_step12_ae64/")
 
 
 def test_the_frozen_modules_are_byte_identical_to_main():

@@ -2234,3 +2234,22 @@ OUTPUTS_ROOT_PAPER = DATA_ROOT / "outputs_official_paper_replication"
 # LOCK_TRAINED_MODELS_AE30.  False while the single configuration is trained,
 # True afterwards.
 LOCK_TRAINED_MODELS_PAPER = False
+
+
+# ===========================================================================
+# AE=64 BOTTLENECK SENSITIVITY (B1, B2, B4, B6; B3 copied; B5 skipped)
+# ===========================================================================
+# A THIRD sensitivity root, beside outputs_official_ae30\, at bottleneck
+# width 64 with the published paper's AE+PCA+LSTM hyperparameters.  As with
+# AE=30, nothing here is a shared hyperparameter: the AE (66->64, no hidden,
+# 20 fixed epochs, batch 850) and the B2/B4 LSTM (1024/512) are the paper's,
+# reused from experiments_step12_paper_replication; only the root and this
+# run's lock live in config.  Approach 1/2 are not part of this run, B5 is
+# skipped (its 30-feature input makes a 64 bottleneck an expansion, not a
+# bottleneck), and B3 (no AE) is copied from the AE=15 result.
+OUTPUTS_ROOT_AE64 = DATA_ROOT / "outputs_official_ae64"
+
+# This root's OWN lock, independent of LOCK_TRAINED_MODELS and
+# LOCK_TRAINED_MODELS_AE30.  False while the configurations are trained,
+# True afterwards.
+LOCK_TRAINED_MODELS_AE64 = False
