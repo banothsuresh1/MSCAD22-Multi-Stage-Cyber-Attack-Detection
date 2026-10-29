@@ -201,3 +201,88 @@ def test_the_lock_makes_a_missing_result_pending(official, monkeypatch):
     out = c64.run_one_ae64("baseline1_ae_cnn_lstm", explode, verbose=False)
     assert out["status"] == c64.PENDING
     assert "LOCK_TRAINED_MODELS_AE64" in out["status_detail"]
+
+
+# ===========================================================================
+# 4. the CNN-LSTM classifier logs per-epoch progress (AE=64 only)
+# ===========================================================================
+# experiments.train_classifier hardcodes model.fit(..., verbose=0), so its
+# CNN-LSTM stage is silent and looks like a hang.  That shared call must NOT
+# change (it is used by every other baseline, approach and AE width); for the
+# AE=64 run only, train_cnn_lstm wraps the one fit() to log per-epoch progress.
+def test_the_classifier_fit_verbosity_is_forced_only_inside_the_context(monkeypatch):
+    from src.mscad import models as md
+
+    class FakeModel:
+        pass
+
+    seen = {}
+
+    def original_fit(self, *args, **kwargs):
+        seen["verbose"] = kwargs.get("verbose", "UNSET")
+        return "fitted"
+
+    FakeModel.fit = original_fit
+    import types
+    monkeypatch.setattr(md, "_keras", lambda: types.SimpleNamespace(Model=FakeModel))
+
+    before = FakeModel.fit
+    with c64._classifier_fit_verbose(2):
+        FakeModel.fit(FakeModel(), verbose=0)       # caller asks for silence
+        assert seen["verbose"] == 2                 # context overrides to per-epoch
+    assert FakeModel.fit is before                  # restored exactly
+    FakeModel.fit(FakeModel(), verbose=0)
+    assert seen["verbose"] == 0                     # caller honoured again outside
+
+
+def test_train_cnn_lstm_leaves_fit_untouched_when_quiet(monkeypatch):
+    """verbose=False must not install the wrapper at all."""
+    from src.mscad import experiments as xp
+    calls = {}
+    monkeypatch.setattr(xp, "train_classifier",
+                        lambda *a, **k: calls.setdefault("kw", k) or ("m", "f", "i"))
+    c64.train_cnn_lstm(pd.DataFrame({"a": [1.0]}), pd.DataFrame({"Label_encoded": [0]}),
+                       verbose=False)
+    assert calls["kw"]["verbose"] is False
+    assert calls["kw"]["model_type"] == "cnn_lstm"
+
+
+# ===========================================================================
+# 5. the consolidated table reuses comparison.py's builder
+# ===========================================================================
+def _config_snapshot():
+    keys = ("STEP12_OUTPUT_DIR", "STEP12_B6_OUTPUT_DIR", "STEP11_OUTPUT_DIR",
+            "STEP11B_OUTPUT_DIR", "OUTPUTS_ROOT", "OUTPUTS_DIR",
+            "LOCK_TRAINED_MODELS")
+    return {k: getattr(config, k, None) for k in keys}
+
+
+def test_the_ae64_table_uses_the_same_columns_and_marks_as_ae15(official):
+    before = _config_snapshot()
+    table = c64.marked_comparison_table()
+    assert list(table.columns) == c64.cmp.COLUMNS          # same builder's columns
+    # the five AE=64 baselines, in display order, then the explicit B5 row
+    labels = list(table["config"])
+    assert labels[-1] == c64.base.display_label("baseline5")
+    assert c64.SKIP_REASON in str(table.iloc[-1]["input features"])
+    assert not any("Approach" in str(v) for v in labels)   # approaches not here
+    assert _config_snapshot() == before                    # redirect restored
+
+
+def test_the_ae64_table_reads_a_trained_baseline_through_the_builder(official):
+    pytest.importorskip("keras")
+    module_for("baseline1_ae64").run(verbose=False)         # writes one real result
+    table = c64.marked_comparison_table()
+    b1 = table[table["config"].str.startswith("B1")].iloc[0]
+    assert b1["latent dim"] == 64                           # read from the flat file
+    assert "*" in str(b1["accuracy"]) or b1["accuracy"] != "-"  # a live, marked value
+    prov = c64.provenance()
+    assert (prov[prov["config"].str.startswith("B1")]["file exists"] == "yes").all()
+
+
+def test_the_ae64_table_is_graceful_when_no_results_exist(official):
+    """Every baseline shows the builder's 'not yet trained', B5 shows skipped."""
+    table = c64.comparison_table()
+    assert len(table) == len(c64.AE64_ORDER)                # no B5 row without marking
+    assert all(config.NOT_TRAINED_TEXT in str(v)
+               for v in table["input features"])
