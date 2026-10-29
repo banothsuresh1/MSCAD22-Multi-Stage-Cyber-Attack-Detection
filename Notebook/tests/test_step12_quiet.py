@@ -349,7 +349,7 @@ def step12_cells():
     cells = nb.cells
     starts = [i for i, c in enumerate(cells)
               if c.cell_type == "markdown"
-              and re.search(r"^## Step \d+ - Model comparison$", c.source,
+              and re.search(r"^## Step \d+ - Model Performance Evaluation$", c.source,
                             re.M)]
     ends = [i for i, c in enumerate(cells)
             if c.cell_type == "markdown"
