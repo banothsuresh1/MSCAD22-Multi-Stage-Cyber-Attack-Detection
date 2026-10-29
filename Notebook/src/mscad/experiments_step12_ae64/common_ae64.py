@@ -45,6 +45,7 @@ if str(_PROJECT_DIR) not in sys.path:
 
 import config  # noqa: E402
 
+from .. import comparison as cmp  # noqa: E402
 from .. import data_loading as dl  # noqa: E402
 from .. import evaluation as ev  # noqa: E402
 from .. import experiments as xp  # noqa: E402
@@ -195,10 +196,47 @@ def pca30(Z_train, Z_test, place, verbose=False):
     return P_train, P_test, pca, info, variance
 
 
+@contextlib.contextmanager
+def _classifier_fit_verbose(level: int = 2) -> Iterator[None]:
+    """Make the CNN-LSTM classifier's fit() log per-epoch progress (AE=64 only).
+
+    experiments.train_classifier is shared by every baseline, approach and AE
+    width, and it hardcodes model.fit(..., verbose=0): its CNN-LSTM stage prints
+    nothing for the whole run, so from the outside a long fit is indistinguishable
+    from a hang.  We must NOT change that shared call (doing so would alter every
+    other width's verbosity), so for the AE=64 run only we wrap keras.Model.fit
+    for the duration of the one train_classifier call and raise its fit verbosity
+    to `level` -- 2 is one line per epoch, exactly what encode_ae64's AE stage
+    already prints with verbose=2.  The original method is restored on the way
+    out, exception or not; nothing outside this context, and no other
+    baseline/approach/width, is touched.
+    """
+    keras = md._keras()
+    original = keras.Model.fit
+
+    def _fit(self, *args, **kwargs):
+        kwargs["verbose"] = level
+        return original(self, *args, **kwargs)
+
+    keras.Model.fit = _fit
+    try:
+        yield
+    finally:
+        keras.Model.fit = original
+
+
 def train_cnn_lstm(P_train, y_train, verbose=False):
-    """B1/B6's EXISTING CNN-LSTM classifier, unchanged (experiments.train_classifier)."""
-    return xp.train_classifier(P_train, y_train, model_type="cnn_lstm",
-                               seed=SEED, verbose=verbose)
+    """B1/B6's EXISTING CNN-LSTM classifier, unchanged (experiments.train_classifier).
+
+    train_classifier hardcodes its fit() verbosity to 0, so when `verbose` is on
+    we wrap that single call (AE=64 run only) so the classifier logs per-epoch
+    progress like the AE stage.  The classifier and its training are unchanged."""
+    if not verbose:
+        return xp.train_classifier(P_train, y_train, model_type="cnn_lstm",
+                                   seed=SEED, verbose=verbose)
+    with _classifier_fit_verbose(2):
+        return xp.train_classifier(P_train, y_train, model_type="cnn_lstm",
+                                   seed=SEED, verbose=verbose)
 
 
 def train_paper_lstm(P_train, y_train, n_classes, verbose=False):
@@ -292,3 +330,108 @@ def run_one_ae64(name: str, trainer: Callable[..., Any],
               % ("LOAD" if status == LOADED else "TRAIN", name, detail))
         dl.show_table(base.headline(metrics), note="%s -- %s" % (name, detail))
     return result
+
+
+# ===========================================================================
+# 6. the AE=64 comparison table, built by the SAME builder as AE=15 / AE=30
+# ===========================================================================
+# The five configurations this run covers, in the AE=15 display order.  The
+# two approaches and B5 are NOT part of the AE=64 run -- the approaches were
+# not re-bottlenecked, and B5 is skipped (see SKIP_REASON) -- so they are not
+# builder rows here; B5 is appended afterwards as an explicit "skipped" row.
+AE64_KEYS = {"baseline1_ae_cnn_lstm", "baseline2_ae_lstm", "baseline3_cnn_lstm",
+             "baseline4_ae_pca_lstm", "baseline6_ae_pca_cnn_lstm"}
+AE64_ORDER = [(k, l) for k, l in config.STEP12_DISPLAY_ORDER if k in AE64_KEYS]
+SKIPPED_KEY = "baseline5"
+SKIP_REASON = ("skipped: its AE trains on 30 MI-selected features, so a 64 "
+               "bottleneck would expand 30 -> 64, not compress")
+
+
+@contextlib.contextmanager
+def _table_redirect() -> Iterator[Path | None]:
+    """Map comparison.result_path onto the FLAT AE=64 layout for one read.
+
+    The AE=64 results are written flat -- <root>\\<NAME>\\metrics.json, one
+    folder per configuration -- not the nested step11/step12 layout the AE=15
+    and AE=30 roots use.  comparison.build_full_comparison resolves each key
+    through comparison.result_path, which reads STEP12_OUTPUT_DIR,
+    STEP12_B6_OUTPUT_DIR, STEP11_OUTPUT_DIR and STEP11B_OUTPUT_DIR.  Pointing
+    those at the AE=64 root (and B6's own folder beneath it) makes the EXISTING
+    builder read exactly the flat files for B1-B4 and B6; the keys with no
+    AE=64 result resolve to a path that does not exist, so they come back as
+    "not yet trained" instead of falling through to the AE=15 root.  Read-only:
+    nothing is written, every attribute is restored afterwards, and it works
+    even where the root is unusable (every key then resolves to None)."""
+    place = config.OUTPUTS_ROOT_AE64
+    wanted = {
+        "STEP12_OUTPUT_DIR": Path(place),
+        "STEP12_B6_OUTPUT_DIR": Path(place) / "baseline6_ae_pca_cnn_lstm",
+        "STEP11_OUTPUT_DIR": Path(place),
+        "STEP11B_OUTPUT_DIR": Path(place),
+    }
+    missing = object()
+    before = {k: getattr(config, k, missing) for k in wanted}
+    for k, v in wanted.items():
+        setattr(config, k, v)
+    try:
+        yield root()
+    finally:
+        for k, v in before.items():
+            if v is missing:                           # pragma: no cover
+                delattr(config, k)
+            else:
+                setattr(config, k, v)
+
+
+def comparison_table(order: Sequence[tuple[str, str]] | None = None
+                     ) -> "pd.DataFrame":
+    """The AE=64 table, built by the SAME builder the AE=15/AE=30 tables use."""
+    order = AE64_ORDER if order is None else order
+    with _table_redirect():
+        built = cmp.build_full_comparison(order=order, verbose=False)
+    return built["table"]
+
+
+def _b5_skip_row() -> dict[str, Any]:
+    """B5's explicit 'skipped' row, in the builder's own columns."""
+    row = {column: "-" for column in cmp.COLUMNS}
+    row["config"] = base.display_label(SKIPPED_KEY)
+    row["input features"] = SKIP_REASON
+    return row
+
+
+def marked_comparison_table(order: Sequence[tuple[str, str]] | None = None,
+                            include_skipped: bool = True) -> "pd.DataFrame":
+    """The AE=64 table with best-value `*` marks, plus the explicit B5 row.
+
+    mark_best is the SAME marker the AE=15/AE=30 tables use, so columns and the
+    `*` convention match across all three widths.  The B5 row is appended AFTER
+    marking (it carries no values to compare), so B5 reads as skipped with its
+    reason rather than as a blank 'not trained' row."""
+    order = AE64_ORDER if order is None else order
+    with _table_redirect():
+        built = cmp.build_full_comparison(order=order, verbose=False)
+        marked = cmp.mark_best(built["table"])
+    if include_skipped:
+        marked = pd.concat([marked, pd.DataFrame([_b5_skip_row()])],
+                           ignore_index=True)[cmp.COLUMNS]
+    return marked
+
+
+def provenance(order: Sequence[tuple[str, str]] | None = None) -> "pd.DataFrame":
+    """Every AE=64 row, its state, and the exact file it was read from."""
+    order = AE64_ORDER if order is None else order
+    rows = []
+    with _table_redirect():
+        for key, label in order:
+            path = cmp.result_path(key)
+            exists = bool(path is not None and Path(path).exists())
+            rows.append({
+                "config": label,
+                "state": "read from disk" if exists else "not trained at AE=64",
+                "metrics.json": "(unreachable here)" if path is None else str(path),
+                "file exists": "yes" if exists else "no",
+            })
+    rows.append({"config": base.display_label(SKIPPED_KEY), "state": "skipped",
+                 "metrics.json": "(not run)", "file exists": "n/a"})
+    return pd.DataFrame(rows)
