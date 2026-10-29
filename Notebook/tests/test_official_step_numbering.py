@@ -71,7 +71,7 @@ NEW_HEADINGS = [
     "## Step 7 - Class imbalance handled in the training loss",
     "## Step 8 - Hybrid classifiers",
     "## Step 9 - Evaluation on the untouched test set",
-    "## Step 10 - Model comparison",
+    "## Step 10 - Model Performance Evaluation",
     "## Step 11 - Adaptive Evidence Fusion",
     "## Step 12 - Explainability Layer",
 ]
