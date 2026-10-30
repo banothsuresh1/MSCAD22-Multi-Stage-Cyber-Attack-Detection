@@ -285,15 +285,17 @@ def _row_from_metrics(label: str, metrics: dict[str, Any]) -> dict[str, Any]:
 def _blank_row(label: str, key: str | None = None) -> dict[str, Any]:
     """A placeholder row for a configuration that has not been trained.
 
-    The cell names the step that produces THIS configuration.  The old fixed
-    text said "run 10.2" for whichever row was missing, and 10.2 trains
-    Approach 2 -- wrong for seven of the eight rows.
+    The "input features" cell is kept as exactly config.NOT_TRAINED_TEXT -- a
+    short, consistent placeholder -- because trained_rows() decides liveness by
+    whether this cell starts with that text.  The "which step produces it"
+    detail is NOT repeated into the cell any more; it belongs in the table's
+    footnote (build_full_comparison's show_note), so an untrained row reads
+    cleanly ("not yet trained" here, "-" in every other column after mark_best).
+    `key` is still accepted for call compatibility but no longer shapes the cell.
     """
     row = {column: None for column in COLUMNS}
     row["config"] = label
-    row["input features"] = (config.NOT_TRAINED_TEXT if key is None
-                             else "%s - %s" % (config.NOT_TRAINED_TEXT,
-                                               which_step_produces(key)))
+    row["input features"] = config.NOT_TRAINED_TEXT
     return row
 
 
@@ -423,7 +425,8 @@ def mark_best(table: pd.DataFrame) -> pd.DataFrame:
 
         def render(value, is_live):
             if pd.isna(value):
-                return config.NOT_TRAINED_TEXT if not is_live else "-"
+                return "-"                 # short placeholder; "not yet trained"
+                                           # lives in the "input features" cell + footnote
             star = "*" if abs(float(value) - float(best)) < 1e-12 else ""
             if column == "params":
                 return "%s%s" % (f"{int(value):,}", star)

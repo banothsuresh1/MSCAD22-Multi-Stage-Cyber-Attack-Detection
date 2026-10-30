@@ -131,10 +131,9 @@ def test_an_untrained_configuration_is_blank_and_named(tmp_path, capsys):
 
     assert built["missing"] == [config.APPROACH2_KEY]
     row = built["table"].iloc[1]
-    # the cell is the state plus the step that produces THIS row
-    assert str(row["input features"]).startswith(config.NOT_TRAINED_TEXT)
-    assert cmp.which_step_produces(config.APPROACH2_KEY) in str(
-        row["input features"])
+    # the cell is now just the short placeholder; the "which step produces it"
+    # detail moved to the table footnote (comparison._blank_row)
+    assert str(row["input features"]) == config.NOT_TRAINED_TEXT
     assert pd.isna(row["F1 (macro)"])
     assert "10.2" in cmp.which_step_produces(config.APPROACH2_KEY)
 
@@ -290,7 +289,7 @@ def test_the_untrained_row_takes_no_part_in_the_marking(tmp_path):
     marked = cmp.mark_best(table)
     row = marked.iloc[1]
 
-    assert row["F1 (macro)"] == config.NOT_TRAINED_TEXT
+    assert row["F1 (macro)"] == "-"          # short placeholder for an untrained cell
     assert "*" not in str(row["F1 (macro)"])
     starred = sum(1 for v in marked["F1 (macro)"] if str(v).endswith("*"))
     assert starred >= 1                     # a trained row still wins
