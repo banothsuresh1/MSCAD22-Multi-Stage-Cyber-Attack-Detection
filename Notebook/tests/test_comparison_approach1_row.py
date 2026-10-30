@@ -264,8 +264,9 @@ def test_a_missing_row_names_its_own_step(official_tree):
     assert len(built["missing"]) == 8
     for key, label in config.STEP12_DISPLAY_ORDER:
         cell = str(table[table["config"] == label]["input features"].iloc[0])
-        assert config.NOT_TRAINED_TEXT in cell, (key, cell)
-        assert cmp.which_step_produces(key) in cell, (key, cell)
+        # the cell is now just the short placeholder; the per-step detail moved
+        # to the table footnote (comparison._blank_row)
+        assert cell == config.NOT_TRAINED_TEXT, (key, cell)
 
 
 def test_the_blank_row_no_longer_sends_everyone_to_section_10_2():
