@@ -30,6 +30,7 @@ Scope, enforced by construction:
 from __future__ import annotations
 
 import contextlib
+import gc
 import json
 import sys
 import time
@@ -162,20 +163,29 @@ def feature_frame_66():
 
 
 def encode_ae64(X_train, X_test, y_train, place, verbose=False):
-    """Paper AE 66 -> 64 (no hidden), fit on the TRAINING rows only."""
-    keras = md._keras()
-    autoencoder, encoder = paper.build_paper_autoencoder(X_train.shape[1])
-    autoencoder.fit(X_train.to_numpy("float32"), X_train.to_numpy("float32"),
-                    epochs=AE_EPOCHS, batch_size=AE_BATCH, shuffle=True,
-                    verbose=2 if verbose else 0)
+    """Paper AE 66 -> 64 (no hidden), fit on the TRAINING rows only.
+
+    The training matrix is converted to float32 ONCE and reused for the fit
+    (input and target) and the encode, instead of three separate .to_numpy()
+    copies -- same result, lower peak memory.  The autoencoder (its decoder
+    head and Adam state) is dropped as soon as the fit is done, before the
+    encodings are built, so only the encoder survives.
+    """
+    Xtr = X_train.to_numpy("float32")          # one copy, reused below
+    autoencoder, encoder = paper.build_paper_autoencoder(Xtr.shape[1])
+    autoencoder.fit(Xtr, Xtr, epochs=AE_EPOCHS, batch_size=AE_BATCH,
+                    shuffle=True, verbose=2 if verbose else 0)
+    del autoencoder                            # decoder + optimizer state done
+    gc.collect()
     cols = ["ae_%d" % i for i in range(AE_LATENT)]
-    Z_train = pd.DataFrame(encoder.predict(X_train.to_numpy("float32"),
-                                           batch_size=AE_BATCH, verbose=0),
+    Z_train = pd.DataFrame(encoder.predict(Xtr, batch_size=AE_BATCH, verbose=0),
                            columns=cols, index=X_train.index)
+    del Xtr
     Z_test = pd.DataFrame(encoder.predict(X_test.to_numpy("float32"),
                                           batch_size=AE_BATCH, verbose=0),
                           columns=cols, index=X_test.index)
     encoder.save(Path(place) / "encoder.keras")
+    gc.collect()
     return Z_train, Z_test, encoder
 
 
@@ -244,6 +254,7 @@ def train_paper_lstm(P_train, y_train, n_classes, verbose=False):
     X_seq, y_enc, _ = md.arrange_inputs(P_train, y_train, meta=None,
                                         mode="feature_seq")
     model = paper.build_paper_lstm((X_seq.shape[1], X_seq.shape[2]), n_classes)
+    gc.collect()                        # sweep transients before the heavy fit
     started = time.perf_counter()
     model.fit(X_seq, np.asarray(y_enc), epochs=CLF_EPOCHS, batch_size=CLF_BATCH,
               shuffle=True, verbose=2 if verbose else 0)

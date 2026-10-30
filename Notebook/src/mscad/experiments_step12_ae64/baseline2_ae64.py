@@ -3,6 +3,7 @@ r"""B2 at AE=64: all features (66) -> AE(66->64, no hidden) -> the paper LSTM
 plain-LSTM classifier TYPE; its layer sizes/regime become the paper's."""
 from __future__ import annotations
 
+import gc
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,12 +35,15 @@ def train(verbose: bool = True) -> dict[str, Any]:
     Path(place).mkdir(parents=True, exist_ok=True)
     data = c64.inputs(verbose=verbose)
     X_train, X_test, dropped = c64.feature_frame_66()
+    n_feat = int(X_train.shape[1])
     Z_train, Z_test, _enc = c64.encode_ae64(X_train, X_test, data["y_train"],
                                              place, verbose=verbose)
+    del X_train, X_test, _enc          # dead after encoding; free before the fit
+    gc.collect()
     n_classes = _n_classes(data["y_train"], data["label_mapping"])
     model, _hist, info = c64.train_paper_lstm(Z_train, data["y_train"],
                                               n_classes, verbose=verbose)
-    desc = {"n_input_features": int(X_train.shape[1]), "dropped_column": dropped,
+    desc = {"n_input_features": n_feat, "dropped_column": dropped,
             "pca_components": None, "classifier": "lstm 1024/512 (paper)"}
     return c64.evaluate_and_save(NAME, LABEL, model, Z_test, data["y_test"],
                                  data["meta_test"], data["label_mapping"],
