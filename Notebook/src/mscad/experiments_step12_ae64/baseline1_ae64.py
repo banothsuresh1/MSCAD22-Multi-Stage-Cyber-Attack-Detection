@@ -2,6 +2,7 @@ r"""B1 at AE=64: all features (66) -> AE(66->64, no hidden) -> the EXISTING
 CNN-LSTM classifier, unchanged.  Only the bottleneck width changes."""
 from __future__ import annotations
 
+import gc
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,11 +24,14 @@ def train(verbose: bool = True) -> dict[str, Any]:
     Path(place).mkdir(parents=True, exist_ok=True)
     data = c64.inputs(verbose=verbose)
     X_train, X_test, dropped = c64.feature_frame_66()
+    n_feat = int(X_train.shape[1])
     Z_train, Z_test, _enc = c64.encode_ae64(X_train, X_test, data["y_train"],
                                              place, verbose=verbose)
+    del X_train, X_test, _enc          # dead after encoding; free before the fit
+    gc.collect()
     model, _hist, info = c64.train_cnn_lstm(Z_train, data["y_train"],
                                             verbose=verbose)
-    desc = {"n_input_features": int(X_train.shape[1]), "dropped_column": dropped,
+    desc = {"n_input_features": n_feat, "dropped_column": dropped,
             "pca_components": None, "classifier": "cnn_lstm (existing)"}
     return c64.evaluate_and_save(NAME, LABEL, model, Z_test, data["y_test"],
                                  data["meta_test"], data["label_mapping"],

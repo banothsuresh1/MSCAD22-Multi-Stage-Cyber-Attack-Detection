@@ -5,6 +5,7 @@ unchanged.  PCA=30 clears build_cnn_lstm's minimum (steps >= CNN_KERNEL=3;
 was tiny, not because of the kernel."""
 from __future__ import annotations
 
+import gc
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,13 +27,17 @@ def train(verbose: bool = True) -> dict[str, Any]:
     Path(place).mkdir(parents=True, exist_ok=True)
     data = c64.inputs(verbose=verbose)
     X_train, X_test, dropped = c64.feature_frame_66()
+    n_feat = int(X_train.shape[1])
     Z_train, Z_test, _enc = c64.encode_ae64(X_train, X_test, data["y_train"],
                                              place, verbose=verbose)
+    del X_train, X_test, _enc          # dead after encoding
     P_train, P_test, _pca, pca_info, _var = c64.pca30(Z_train, Z_test, place,
                                                       verbose=verbose)
+    del Z_train, Z_test                # PCA carries forward; free before the fit
+    gc.collect()
     model, _hist, info = c64.train_cnn_lstm(P_train, data["y_train"],
                                             verbose=verbose)
-    desc = {"n_input_features": int(X_train.shape[1]), "dropped_column": dropped,
+    desc = {"n_input_features": n_feat, "dropped_column": dropped,
             "pca_components": int(pca_info["n_components"]),
             "classifier": "cnn_lstm (existing)"}
     return c64.evaluate_and_save(NAME, LABEL, model, P_test, data["y_test"],

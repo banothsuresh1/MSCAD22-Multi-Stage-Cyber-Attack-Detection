@@ -3,6 +3,7 @@ r"""B4 at AE=64: all features (66) -> AE(66->64, no hidden) -> PCA -> 30
 dropout 0.6 -> 512).  B4 keeps its plain-LSTM TYPE; sizes become the paper's."""
 from __future__ import annotations
 
+import gc
 import sys
 from pathlib import Path
 from typing import Any
@@ -27,16 +28,20 @@ def train(verbose: bool = True) -> dict[str, Any]:
     Path(place).mkdir(parents=True, exist_ok=True)
     data = c64.inputs(verbose=verbose)
     X_train, X_test, dropped = c64.feature_frame_66()
+    n_feat = int(X_train.shape[1])
     Z_train, Z_test, _enc = c64.encode_ae64(X_train, X_test, data["y_train"],
                                              place, verbose=verbose)
+    del X_train, X_test, _enc          # dead after encoding
     P_train, P_test, _pca, pca_info, _var = c64.pca30(Z_train, Z_test, place,
                                                       verbose=verbose)
+    del Z_train, Z_test                # PCA carries forward; free before the fit
+    gc.collect()
     n = int(np.asarray(data["y_train"]["Label_encoded"]).max() + 1)
     if data["label_mapping"]:
         n = max(n, len(ev.label_names_from_mapping(data["label_mapping"])))
     model, _hist, info = c64.train_paper_lstm(P_train, data["y_train"], n,
                                               verbose=verbose)
-    desc = {"n_input_features": int(X_train.shape[1]), "dropped_column": dropped,
+    desc = {"n_input_features": n_feat, "dropped_column": dropped,
             "pca_components": int(pca_info["n_components"]),
             "classifier": "lstm 1024/512 (paper)"}
     return c64.evaluate_and_save(NAME, LABEL, model, P_test, data["y_test"],
